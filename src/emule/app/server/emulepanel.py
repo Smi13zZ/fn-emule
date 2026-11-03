@@ -2780,6 +2780,28 @@ class Handler(BaseHTTPRequestHandler):
 
         self.fail(404, "接口不存在：%s" % path)
 
+def validate_fpk(path):
+    """卸载之前先确认下载的 fpk 是合法的本应用安装包（结构 + appname）。"""
+    import tarfile
+    try:
+        with tarfile.open(path, "r:gz") as tf:
+            names = tf.getnames()
+            if "manifest" not in names or "app.tgz" not in names:
+                raise ValueError("安装包结构不完整")
+            raw = tf.extractfile("manifest").read().decode("utf-8", "replace")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("安装包无法解压：%s" % exc)
+    appname = ""
+    for line in raw.splitlines():
+        if line.strip().startswith("appname"):
+            appname = line.split("=", 1)[1].strip()
+            break
+    if appname != "fn-emule":
+        raise ValueError("安装包应用名不匹配：%s" % (appname or "?"))
+
+
     # -- 更新安装（只下载，不调用 fnOS 安装器） -----------------------------
     def install_update(self):
         info = RT.update_checker.check(force=True)
@@ -2810,7 +2832,8 @@ class Handler(BaseHTTPRequestHandler):
             RT.log("更新包下载失败：%s" % (exc,), level="error")
             self.fail(502, "下载安装包失败：%s" % (exc,))
             return
-        RT.log("更新包已下载：%s（%d 字节）" % (result["path"], result["size"]))
+        validate_fpk(result["path"])
+        RT.log("更新包已下载并通过校验：%s（%d 字节）" % (result["path"], result["size"]))
 
         # 参照 fn-knock 的成熟做法：stop → uninstall → install-fpk → start。
         # 实测 fnOS 的 uninstall 不删除 @appdata（面板设置与下载进度都保留），
@@ -2840,7 +2863,16 @@ class Handler(BaseHTTPRequestHandler):
             "sleep 2\n"
             'appcenter-cli install-fpk "$FPK" -e "$ENV_FILE" -v 1 2>&1 | tr "\r" "\n" | grep -vE "installing|Verifying" | tail -3 >&9\n'
             "sleep 2\n"
-            'appcenter-cli start "$APP_NAME" 2>&1 | tr "\r" "\n" | tail -1 >&9\n'
+            'started=0\n' +
+            'n=0\n' +
+            'while [ "$n" -lt 6 ]; do\n' +
+            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting"; then started=1; break; fi\n' +
+            '  appcenter-cli start "$APP_NAME" 2>&1 | tail -1 >&9\n' +
+            '  sleep 3\n' +
+            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting"; then started=1; break; fi\n' +
+            '  n=$((n + 1))\n' +
+            'done\n' +
+            'if [ "$started" != "1" ]; then log "new package did not start, see log"; exit 1; fi\n'
             'log "更新安装脚本结束"'
         )
         with open(script_path, "w", encoding="utf-8") as handle:
