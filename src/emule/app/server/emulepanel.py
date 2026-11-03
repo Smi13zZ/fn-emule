@@ -2590,6 +2590,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/notify/settings":
             self.require_method(method, "POST")
             body = self.json_body()
+            # 两种载荷都接受：
+            #   扁平 {enabled, events:{complete,error}} / {on_complete, on_error}
+            #   包一层 {settings:{...}}（与 /api/settings 的写法统一）
+            if isinstance(body.get("settings"), dict):
+                body = body["settings"]
             cfg = RT.store.section("notify")
             events = as_dict(cfg.get("events"))
             patch = {}

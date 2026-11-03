@@ -145,6 +145,8 @@ def build_one(host, workdir, platform, ver, app, keywords):
     print("[out] %s (%d bytes)" % (out_name, os.path.getsize(out_path)))
 
     scp_up(os.path.join(ROOT, "tools", "verify_fpk.py"), "/tmp/emule-verify-fpk.py", host)
+    # verify_fpk 的验包结构闸门依赖 check_structure，必须一起送过去
+    scp_up(os.path.join(ROOT, "tools", "check_structure.py"), "/tmp/check_structure.py", host)
     scp_up(out_path, "/tmp/emule-last-%s.fpk" % platform, host)
     print(ssh("python3 /tmp/emule-verify-fpk.py /tmp/emule-last-%s.fpk 2>&1" % platform, host))
     return out_path
