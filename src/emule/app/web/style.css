@@ -688,7 +688,8 @@ input[type="number"] { -moz-appearance: textfield; }
 @keyframes popin { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
 
 .logline { font-family: var(--mono); font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border-soft); display: flex; gap: 12px; }
-.logline .t { color: var(--faint); flex: 0 0 148px; }
+.logline .t { color: var(--faint); flex: 0 0 172px; display: inline-flex; align-items: baseline; gap: 10px; white-space: nowrap; }
+.logline .t .d { opacity: .8; }
 .logline.warn .m { color: var(--warn); }
 .logline.err .m { color: var(--danger); }
 
@@ -1194,3 +1195,7 @@ canvas { display: block; width: 100%; height: 100%; }
   .checklevel { display: none; }
   .sugglist { padding-left: 16px; }
 }
+
+/* ---------- settings: engine status bar (user asked to SEE engine state after save) ---------- */
+.settings-engine-bar { border-left: 3px solid var(--accent); }
+.settings-engine-bar .chip .dot { margin-right: 6px; }
