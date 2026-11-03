@@ -1332,32 +1332,88 @@ def _diag_firewall(tcp_port, udp_port, deadline):
 
 
 def _diag_public_ip(deadline):
-    """返回 (public_ip, error)。失败快速放弃，不影响整体。"""
-    last_error = ""
-    for url in PUBLIC_IP_URLS:
-        remaining = _diag_remaining(deadline)
-        if remaining < 0.8:
-            last_error = last_error or "剩余诊断预算不足，已跳过公网 IP 探测"
-            break
+    """双栈探测公网 IP：返回 (ipv4, ipv6, error)。
+
+    两种网络环境都要能工作：
+    - 直连网络：按 family 钉死请求（getaddrinfo 只解析 A / AAAA）；
+    - 代理网络（DNS 被劫持成 fake-ip）：钉死 family 会让证书校验失败，
+      此时回退到默认请求（urllib 走系统偏好栈），从返回文本里挑对应版本地址；
+      v6 用 ipify 的 /v6 端点等"只返回 IPv6"的服务来拿。
+    - 一边失败不阻塞另一边；全失败才置 error。
+    """
+    ipv4, ipv6 = "", ""
+    errors = []
+    hosts = [u.split("//")[-1].split("/")[0] for u in PUBLIC_IP_URLS]
+
+    def pick(text, family):
+        for piece in (text or "").strip().replace(" ", ",").split(","):
+            piece = piece.strip()
+            try:
+                addr = ipaddress.ip_address(piece)
+            except ValueError:
+                continue
+            if addr.version == family:
+                return str(addr)
+        return ""
+
+    def try_fetch(url, family):
+        budget = min(2.5, max(0.8, _diag_remaining(deadline) / 2.0))
+        if budget < 0.8:
+            return None, "剩余诊断预算不足"
         try:
-            text = netutil.get_text(url, timeout=min(2.5, remaining), retries=0)
+            return netutil.get_text(url, timeout=budget, retries=0, family=family), ""
         except netutil.FetchError as exc:
-            last_error = str(exc)
-            continue
-        except Exception as exc:  # noqa: BLE001 - 探测失败只能降级
-            last_error = "请求公网 IP 服务失败：%s" % exc
-            continue
-        candidate = (text or "").strip().splitlines()[0].strip() if (text or "").strip() else ""
-        try:
-            address = ipaddress.ip_address(candidate)
-        except ValueError:
-            last_error = "公网 IP 服务返回了无法识别的内容"
-            continue
-        if address.version != 4:
-            last_error = "公网 IP 是 IPv6，当前只统计 IPv4"
-            continue
-        return str(address), ""
-    return "", last_error or "公网 IP 探测失败"
+            return None, str(exc)
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
+
+    # 第一轮：family 钉死（直连网络）
+    for url in PUBLIC_IP_URLS:
+        if _diag_remaining(deadline) < 0.8:
+            break
+        host = url.split("//")[-1].split("/")[0]
+        for family, bucket in ((4, "ipv4"), (6, "ipv6")):
+            if bucket == "ipv4" and ipv4 or bucket == "ipv6" and ipv6:
+                continue
+            text, err = try_fetch(url, family)
+            got = pick(text, family) if text else ""
+            if got:
+                if family == 4: ipv4 = got
+                else: ipv6 = got
+            elif err:
+                errors.append("%s (IPv%d)：%s" % (host, family, err))
+        if ipv4 and ipv6:
+            break
+
+    # 第二轮：回退默认请求 + IPv6 专用端点（代理/fake-ip 网络）
+    fallback_urls = [u for u in PUBLIC_IP_URLS]
+    if not ipv4:
+        for url in fallback_urls:
+            text, err = try_fetch(url, 0)
+            got = pick(text, 4) if text else ""
+            if got:
+                ipv4 = got
+                break
+            if err:
+                errors.append("%s (fallback IPv4)：%s" % (url.split("//")[-1].split("/")[0], err))
+    if not ipv6:
+        v6_urls = ["https://api6.ipify.org", "https://ipv6.icanhazip.com",
+                   "https://v6.ident.me"]
+        for url in v6_urls:
+            text, err = try_fetch(url, 0)
+            got = pick(text, 6) if text else ""
+            if got:
+                ipv6 = got
+                break
+    if not ipv4 and not ipv6:
+        error = "；".join(errors[-2:]) or "公网 IP 探测失败"
+    elif not ipv6:
+        # v4 拿到了、v6 没有：区分两种情况，给用户一句可操作的说明
+        error = ("未获取到 IPv6 公网地址：设备虽有 IPv6 地址，但当前 DNS（可能是路由器代理的 fake-ip 模式）"
+                 "不返回 AAAA 记录，或运营商未提供 IPv6 出口；不影响 IPv4 下载，Kad/来源也走 IPv4")
+    else:
+        error = ""
+    return ipv4, ipv6, error
 
 
 def _is_private_ip(text):
@@ -1399,7 +1455,7 @@ def _diag_engine_probe(runtime):
 def _diag_local_facts(deadline, tcp_port, udp_port):
     """只读的本机事实：网卡/路由/端口监听/防火墙/公网 IP。不发任何 EC 请求。"""
     host_info = {"lan_ip": "", "gateway": "", "iface": "",
-                 "public_ip": "", "public_ip_error": "",
+                 "public_ip": "", "public_ip_error": "", "public_ip6": "", "public_ip6": "",
                  "private_ip": False, "cgnat_suspect": False}
     route_ok, route_out, _err = _run_readonly(["ip", "-4", "route", "get", "1.1.1.1"],
                                               _diag_probe_timeout(deadline))
@@ -1418,8 +1474,9 @@ def _diag_local_facts(deadline, tcp_port, udp_port):
     udp_ok, udp_lines, udp_err = _diag_ss_count(
         ["ss", "-Huln", "sport = :%d" % udp_port] if udp_port else ["ss", "-Huln"], deadline)
     firewall, firewall_detail = _diag_firewall(tcp_port, udp_port, deadline)
-    public_ip, public_ip_error = _diag_public_ip(deadline)
+    public_ip, public_ip6, public_ip_error = _diag_public_ip(deadline)
     host_info["public_ip"] = public_ip
+    host_info["public_ip6"] = public_ip6
     host_info["public_ip_error"] = public_ip_error
     host_info["cgnat_suspect"] = _is_cgnat(public_ip)
     facts = {
@@ -1634,7 +1691,7 @@ def build_diagnostics(runtime):
 
     # ---- 本机侧探测 ----
     host_info = {"lan_ip": "", "gateway": "", "iface": "",
-                 "public_ip": "", "public_ip_error": "",
+                 "public_ip": "", "public_ip_error": "", "public_ip6": "", "public_ip6": "",
                  "private_ip": False, "cgnat_suspect": False}
     route_ok, route_out, _route_err = _run_readonly(["ip", "-4", "route", "get", "1.1.1.1"],
                                                     _diag_probe_timeout(deadline))
@@ -1656,8 +1713,9 @@ def build_diagnostics(runtime):
     udp_bound = bool(udp_ok and udp_lines > 0)
 
     firewall_state, firewall_detail = _diag_firewall(tcp_port, udp_port, deadline)
-    public_ip, public_ip_error = _diag_public_ip(deadline)
+    public_ip, public_ip6, public_ip_error = _diag_public_ip(deadline)
     host_info["public_ip"] = public_ip
+    host_info["public_ip6"] = public_ip6
     host_info["public_ip_error"] = public_ip_error
     host_info["cgnat_suspect"] = _is_cgnat(public_ip)
 
@@ -1715,7 +1773,9 @@ def build_diagnostics(runtime):
                                   "公网可以主动连到本机 TCP %d。" % tcp_port))
     else:
         checks.append(_diag_check("high_id", "warn", "eD2k 为 Low ID（受限）",
-                                  "服务器反连本机 TCP %d 失败，来源与速度会受影响。" % tcp_port,
+                                  "服务器反连本机 TCP %d 失败，来源与速度会受影响。"
+                                  "UPnP 已开启时路由器本应自动映射该端口；未生效多为路由器固件对 UPnP 兼容性差，"
+                                  "可登录路由器确认映射记录，手动转发最可靠。" % tcp_port,
                                   "路由器把 TCP %d 转发到 %s" % (tcp_port, host_text)))
 
     if not running:
@@ -1728,6 +1788,8 @@ def build_diagnostics(runtime):
     elif kad_connected:
         checks.append(_diag_check("kad", "warn", "Kad 受限（firewalled）",
                                   "外部节点无法主动连入 UDP %d，搜索与来源会变少（节点 %d）。"
+                                  "注意：UPnP 只负责尝试自动映射端口，映射是否成功要看路由器，"
+                                  "可在路由器管理页查看 4662/4672 的映射记录。"
                                   % (udp_port, int_or(kad.get("nodes"))),
                                   "路由器把 UDP %d 转发到 %s" % (udp_port, host_text)))
     else:
