@@ -911,9 +911,9 @@ canvas { display: block; width: 100%; height: 100%; }
      from the very bottom of the screen. The scale-up animation makes content-
      height changes (e.g. add-task tab switch) grow in place instead of jumping
      the header up and down against the topbar. */
-  .modal-wrap { padding: 8vh 14px 14px; place-items: start center; align-items: flex-start; }
+  .modal-wrap { padding: 10vh 16px 16px; place-items: start center; align-items: flex-start; }
   .modal {
-    width: 100%; max-width: 480px; max-height: 80vh;
+    width: min(92vw, 420px); max-height: 80vh;
     border-radius: var(--radius-lg);
     padding-bottom: calc(14px + env(safe-area-inset-bottom));
     animation: modalpop .22s cubic-bezier(.2, .9, .3, 1);
