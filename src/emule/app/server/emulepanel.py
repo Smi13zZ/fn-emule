@@ -307,7 +307,7 @@ class UpdateChecker(object):
     def _from_atom(self, repo):
         """REST API 被限流（403/429）时的退路：releases.atom 没有配额。
 
-        这也是 qbpanel 的做法 —— 家用宽带出口 IP 共享，匿名 60 次/小时很容易打满。
+        家用宽带出口 IP 共享，匿名 60 次/小时的限额很容易打满，所以要有退路。
         """
         xml = netutil.get_text("https://github.com/%s/releases.atom" % repo, timeout=10.0)
         entry = re.search(r"<entry>(.*?)</entry>", xml, re.S)
@@ -2835,7 +2835,7 @@ def validate_fpk(path):
         validate_fpk(result["path"])
         RT.log("更新包已下载并通过校验：%s（%d 字节）" % (result["path"], result["size"]))
 
-        # 参照 fn-knock 的成熟做法：stop → uninstall → install-fpk → start。
+        # 覆盖升级流程：stop → uninstall → install-fpk → start（fnOS 不支持直接覆盖安装）。
         # 实测 fnOS 的 uninstall 不删除 @appdata（面板设置与下载进度都保留），
         # 所以覆盖升级是安全的。脚本以后台方式运行（面板进程本身会被重启）。
         var_dir = RT.store.var_dir
