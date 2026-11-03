@@ -223,7 +223,7 @@
           </div>
           <div class="faint" v-if="!recentLogs.length" style="padding:6px 0">{{ t('overview.noLogs') }}</div>
           <div class="logline" v-for="(l, i) in recentLogs" :key="'rl' + i" :class="l.level">
-            <span class="t mono">{{ fmt.fmtDateMin(l.t) }}</span>
+            <span class="t mono"><span class="d">{{ fmt.fmtDate(l.t).slice(0, 10) }}</span><span class="h">{{ fmt.fmtClock(l.t) }}</span></span>
             <span class="m">{{ l.text }}</span>
           </div>
         </div>
@@ -902,6 +902,10 @@
               <dd class="mono">{{ diagHost.public_ip || '—' }}
                 <span class="faint" v-if="diagHost.public_ip_error"> · {{ diagHost.public_ip_error }}</span>
               </dd>
+              <dt>{{ t('diag.publicIp6') }}</dt>
+              <dd class="mono">{{ diagHost.public_ip6 || '—' }}
+                <span class="faint" v-if="!diagHost.public_ip6"> · {{ diagHost.public_ip_error || t('diag.publicIp6None') }}</span>
+              </dd>
               <dt>{{ t('diag.cgnat') }}</dt>
               <dd>{{ diagHost.cgnat_suspect ? t('diag.level.warn') : t('diag.level.ok') }}</dd>
               <dt>{{ t('diag.firewall') }}</dt>
@@ -936,6 +940,22 @@
             <span>{{ st.label }}</span>
             <i class="workbar-dot" v-if="st.id === 'update' && updateNew"></i>
           </button>
+        </div>
+
+        <!-- ---------- engine status bar: 保存后能立即看到引擎是否真的重启成功 ---------- -->
+        <div class="card settings-engine-bar" v-if="engineBarVisible">
+          <div class="row" style="gap:14px;align-items:center;flex-wrap:wrap">
+            <span class="chip"><i class="dot" :class="engineDotClass"></i>
+              <span>{{ engineStatusText }}</span></span>
+            <span class="faint mono" v-if="engineVersionText">aMule {{ engineVersionText }}</span>
+            <span class="faint mono" v-if="engineUptimeText">· {{ engineUptimeText }}</span>
+            <div class="spacer"></div>
+            <button class="btn sm" :disabled="coreWorking" @click="restartEngine">
+              <span class="ic" v-html="ic(coreWorking ? 'refresh' : 'plug')"></span>
+              {{ coreWorking ? t('engine.working') : (engineRunning ? t('engine.restart') : t('engine.start')) }}
+            </button>
+          </div>
+          <div class="faint" style="font-size:12px;margin-top:6px" v-if="engineBarNote">{{ engineBarNote }}</div>
         </div>
 
         <!-- ---------- panel ---------- -->
