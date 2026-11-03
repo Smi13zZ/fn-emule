@@ -8,7 +8,7 @@
 
 纯 Python 3 标准库后端 · Vue 3 单页前端 · 内置引擎与依赖库 · 桌面端与手机端自适应
 
-[功能](#功能一览) · [截图](#界面预览) · [安装](#安装) · [使用手册](#使用手册) · [常见问题](#常见问题) · [更新日志](CHANGELOG.md) · [开发说明](docs/DEVELOPMENT.md)
+[功能](#功能一览) · 🌍 [English](README_EN.md) · [截图](#界面预览) · [安装](#安装) · [使用手册](#使用手册) · [常见问题](#常见问题) · [更新日志](CHANGELOG.md) · [开发说明](docs/DEVELOPMENT.md)
 
 </div>
 
@@ -107,7 +107,7 @@ eMule 电驴把 **aMule**（eMule 在 Linux 上的官方同源实现）做成了
 
 ```bash
 # 把 fpk 传到设备上后执行（需要 sudo）
-sudo appcenter-cli install-fpk /path/to/fn-emule-26.11.4-fnos-x86.fpk
+sudo appcenter-cli install-fpk /path/to/fn-emule-26.11.4-fnos-all.fpk
 sudo appcenter-cli start fn-emule        # 启动
 sudo appcenter-cli status --appname fn-emule
 ```
@@ -259,7 +259,7 @@ python tools/build_fpk.py --install   # 打完顺手装到测试机
 ### 验收
 
 ```bash
-python3 tools/verify_fpk.py output/fn-emule-26.11.4-fnos-x86.fpk   # 结构 + 权限
+python3 tools/verify_fpk.py output/fn-emule-26.11.4-fnos-all.fpk   # 结构 + 权限
 python3 tools/smoke_test.py --base http://127.0.0.1:17581           # 装好后跑接口验收
 ```
 
