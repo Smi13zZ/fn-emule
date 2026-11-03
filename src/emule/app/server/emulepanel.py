@@ -23,6 +23,7 @@ import mimetypes
 import os
 import queue
 import re
+import shlex
 import signal
 import socket
 import subprocess
@@ -1410,12 +1411,10 @@ def _diag_public_ip(deadline):
     error4 = ""
     error6 = ""
     v4_errors = [e for e in errors if "(IPv4)" in e]
-    v6_errors = [e for e in errors if "(IPv6)" in e]
     if not ipv4:
         error4 = "；".join(v4_errors[-2:]) or "公网 IPv4 探测失败"
     if not ipv6:
-        error6 = "；".join(v6_errors[-2:]) or \
-            "未获取到 IPv6 公网地址（DNS 未返回 AAAA 记录或运营商未提供 IPv6 出口）"
+        error6 = "未获取到 IPv6 公网地址（设备或网络可能没有 IPv6 出口）"
     return ipv4, ipv6, error4, error6
 
 
@@ -2812,9 +2811,48 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(502, "下载安装包失败：%s" % (exc,))
             return
         RT.log("更新包已下载：%s（%d 字节）" % (result["path"], result["size"]))
+
+        # 参照 fn-knock 的成熟做法：stop → uninstall → install-fpk → start。
+        # 实测 fnOS 的 uninstall 不删除 @appdata（面板设置与下载进度都保留），
+        # 所以覆盖升级是安全的。脚本以后台方式运行（面板进程本身会被重启）。
+        var_dir = RT.store.var_dir
+        panel_cfg = as_dict(RT.store.section("panel"))
+        engine_cfg = as_dict(RT.store.section("engine"))
+        env_path = os.path.join(var_dir, "update.env")
+        with open(env_path, "w", encoding="utf-8") as handle:
+            handle.write("wizard_backend_port=%d\n" % int_or(panel_cfg.get("port"), 17581))
+            handle.write("wizard_tcp_port=%d\n" % int_or(engine_cfg.get("tcp_port"), 4662))
+            handle.write("wizard_udp_port=%d\n" % int_or(engine_cfg.get("udp_port"), 4672))
+        script_path = os.path.join(var_dir, "update-install.sh")
+        script = (
+            "#!/bin/bash\n"
+            "set -u\n"
+            'APP_NAME="fn-emule"'
+            "FPK=" + shlex_quote(result["path"]) + "\n"
+            "ENV_FILE=" + shlex_quote(env_path) + "\n"
+            "LOG=" + shlex_quote(os.path.join(var_dir, "update-install.log")) + "\n"
+            'exec 9>>"$LOG"'
+            "log() { echo \"[$(date +%F_%T)] $*\" >&9; }\n"
+            'log "开始更新安装：$FPK"'
+            'appcenter-cli stop "$APP_NAME" >/dev/null 2>&1 || true\n'
+            "sleep 2\n"
+            'appcenter-cli uninstall "$APP_NAME" 2>&1 | tr "\r" "\n" | tail -1 >&9\n'
+            "sleep 2\n"
+            'appcenter-cli install-fpk "$FPK" -e "$ENV_FILE" -v 1 2>&1 | tr "\r" "\n" | grep -vE "installing|Verifying" | tail -3 >&9\n'
+            "sleep 2\n"
+            'appcenter-cli start "$APP_NAME" 2>&1 | tr "\r" "\n" | tail -1 >&9\n'
+            'log "更新安装脚本结束"'
+        )
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        os.chmod(script_path, 0o755)
+        RT.log("启动后台更新脚本，面板即将重启")
+        subprocess.Popen(["/bin/bash", "-c",
+                          "exec setsid \"%s\" >/dev/null 2>&1 < /dev/null &" % script_path],
+                         cwd=var_dir, start_new_session=True)
         self.send_json({"ok": True, "path": result["path"], "name": name,
                         "size": result["size"], "version": info.get("latest") or "",
-                        "note": "安装包已下载到 var/updates，请在应用中心手动安装"})
+                        "note": "安装包已下载，正在后台执行覆盖升级（面板会短暂离线后自动恢复）"})
 
     # -- 小工具 -------------------------------------------------------------
     def delete_notify_channel(self, channel_id):
