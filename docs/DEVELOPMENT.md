@@ -77,7 +77,7 @@ python tools/prepare_runtime.sh        # 仅重取 aMule 运行时（在 Linux �
 
 ## 多架构（单包通吃 x86 + ARM）
 
-只发**一个** fpk（`-fnos-all.fpk`，manifest 里 `platform = all`），和 qbpanel 的做法一致：
+只发**一个** fpk（`-fnos-all.fpk`，manifest 里 `platform = all`），：
 
 ```
 app/runtime/amd64/usr/bin/amuled   + usr/lib/x86_64-linux-gnu/*.so*
