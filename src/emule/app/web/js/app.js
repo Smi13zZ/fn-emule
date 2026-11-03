@@ -1681,38 +1681,21 @@
       },
       runInstall: async function () {
         this.updateInstalling = true;
-        this.updateInstallDetail = this.t("settings.update.installing");
+        this.updateInstallDetail = this.t("settings.update.installingDownload");
         try {
           const r = await window.EMU_API.installUpdate();
           if (r && r.ok === false) throw new Error(r.error || "");
-          this.pollAfterInstall();
+          // 面板只负责下载 fpk（fnOS 没有面向应用的覆盖安装接口，强行 uninstall 会清掉
+          // 用户设置），所以下载完成后明确告知去应用中心手动安装，而不是轮询版本号
+          // 造成"一直更新超时"的假象。
+          this.updateInstalling = false;
+          this.updateInstallDetail = "";
+          this.updateDownloaded = r || {};
+          this.ok("settings.update.downloaded", { v: r && r.version ? r.version : "" });
         } catch (e) {
           this.updateInstalling = false;
           this.updateError = this.t("settings.update.installFailed", { v: (e && e.message) || "" });
         }
-      },
-      pollAfterInstall: function () {
-        const self = this;
-        const oldVersion = this.appVersion;
-        let tries = 0;
-        clearInterval(this.installTimer);
-        this.installTimer = setInterval(async function () {
-          tries += 1;
-          try {
-            const h = await window.EMU_API.health();
-            if (h && h.version && h.version !== oldVersion) {
-              clearInterval(self.installTimer);
-              self.updateInstallDetail = self.t("settings.update.done", { v: h.version });
-              setTimeout(function () { location.reload(); }, 900);
-              return;
-            }
-          } catch (e) { /* the panel is down while appcenter reinstalls it */ }
-          if (tries > 100) {
-            clearInterval(self.installTimer);
-            self.updateInstalling = false;
-            self.updateError = self.t("err.timeout");
-          }
-        }, 2000);
       },
 
       /* ---------------- charts ---------------- */
