@@ -8,11 +8,14 @@ py_compile 只验语法，完全放过这种问题。
 用法：
     python tools/check_structure.py src/emule/app/server/emulepanel.py [...]
 
-两项检查：
+三项检查：
   1. 模块级函数里嵌套了形如 method(self, ...) 的 def —— 缩进跑偏的典型指纹
   2. 类内 self.xxx 有使用、但类里从未定义，且不属于基类提供的属性 —— 运行必炸
+  3. 用了但从未定义/导入的全局名字（如把 shlex.quote 写成 shlex_quote）——
+     同样语法合法、导入正常，只在执行到那一行时抛 NameError
 """
 import ast
+import builtins
 import sys
 
 # BaseHTTPRequestHandler / socketserver 提供的实例属性与方法，不算缺失
@@ -90,6 +93,21 @@ def _walk_self(body):
     return used, assigned
 
 
+def _all_args(node):
+    """收集一个函数/lambda 的全部参数名（含 *args / **kwargs / 仅关键字参数）。"""
+    args = getattr(node, "args", None)
+    if args is None:
+        return []
+    names = []
+    for group in (getattr(args, "posonlyargs", []), args.args, args.kwonlyargs):
+        for arg in group:
+            names.append(arg.arg)
+    for extra in (args.vararg, args.kwarg):
+        if extra is not None:
+            names.append(extra.arg)
+    return names
+
+
 def check_source(src, label="<source>"):
     """对源码字节做结构检查，返回问题列表（空列表表示通过）。"""
     if isinstance(src, str):
@@ -149,6 +167,46 @@ def check_source(src, label="<source>"):
         if missing:
             problems.append("类 %s 缺少这些 self 属性/方法：%s"
                             % (node.name, ", ".join(missing)))
+
+    # 3) 用了但从未定义/导入的全局名字（NameError 只在执行到那行时才爆）
+    # __file__ / __name__ 等模块级魔法变量不需要定义就是可用的
+    defined = set(dir(builtins)) | {
+        "__file__", "__name__", "__doc__", "__package__", "__spec__",
+        "__loader__", "__builtins__", "__debug__", "__cached__",
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.add(node.name)
+            for arg in _all_args(node):
+                defined.add(arg)
+        elif isinstance(node, ast.Lambda):
+            for arg in _all_args(node):
+                defined.add(arg)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                defined.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                defined.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            defined.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            defined.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            defined.update(node.names)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            for sub in ast.walk(node.optional_vars):
+                if isinstance(sub, ast.Name):
+                    defined.add(sub.id)
+
+    used = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            used.setdefault(node.id, node.lineno)
+    missing_names = sorted(name for name in used if name not in defined)
+    if missing_names:
+        detail = ", ".join("%s(第 %d 行)" % (name, used[name]) for name in missing_names)
+        problems.append("用了但从未定义或导入的名字：%s" % detail)
 
     return problems
 

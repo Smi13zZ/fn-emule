@@ -2830,37 +2830,52 @@ class Handler(BaseHTTPRequestHandler):
             handle.write("wizard_tcp_port=%d\n" % int_or(engine_cfg.get("tcp_port"), 4662))
             handle.write("wizard_udp_port=%d\n" % int_or(engine_cfg.get("udp_port"), 4672))
         script_path = os.path.join(var_dir, "update-install.sh")
-        script = (
-            "#!/bin/bash\n"
-            "set -u\n"
-            'APP_NAME="fn-emule"'
-            "FPK=" + shlex_quote(result["path"]) + "\n"
-            "ENV_FILE=" + shlex_quote(env_path) + "\n"
-            "LOG=" + shlex_quote(os.path.join(var_dir, "update-install.log")) + "\n"
-            'exec 9>>"$LOG"'
-            "log() { echo \"[$(date +%F_%T)] $*\" >&9; }\n"
-            'log "开始更新安装：$FPK"'
-            'appcenter-cli stop "$APP_NAME" >/dev/null 2>&1 || true\n'
-            "sleep 2\n"
-            'appcenter-cli uninstall "$APP_NAME" 2>&1 | tr "\r" "\n" | tail -1 >&9\n'
-            "sleep 2\n"
-            'appcenter-cli install-fpk "$FPK" -e "$ENV_FILE" -v 1 2>&1 | tr "\r" "\n" | grep -vE "installing|Verifying" | tail -3 >&9\n'
-            "sleep 2\n"
-            'started=0\n' +
-            'n=0\n' +
-            'while [ "$n" -lt 6 ]; do\n' +
-            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting"; then started=1; break; fi\n' +
-            '  appcenter-cli start "$APP_NAME" 2>&1 | tail -1 >&9\n' +
-            '  sleep 3\n' +
-            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting"; then started=1; break; fi\n' +
-            '  n=$((n + 1))\n' +
-            'done\n' +
-            'if [ "$started" != "1" ]; then log "new package did not start, see log"; exit 1; fi\n'
-            'log "更新安装脚本结束"'
-        )
+        lines = [
+            "#!/bin/bash",
+            "set -u",
+            'APP_NAME="fn-emule"',
+            "FPK=" + shlex.quote(result["path"]),
+            "ENV_FILE=" + shlex.quote(env_path),
+            "LOG=" + shlex.quote(var_dir.rstrip("/") + "/update-install.log"),
+            'exec 9>>"$LOG"',
+            'log() { echo "[$(date +%F_%T)] $*" >&9; }',
+            'log "开始更新安装：$FPK"',
+            'appcenter-cli stop "$APP_NAME" >/dev/null 2>&1 || true',
+            "sleep 2",
+            'appcenter-cli uninstall "$APP_NAME" 2>&1 | tr "\\r" "\\n" | tail -1 >&9',
+            "sleep 2",
+            'appcenter-cli install-fpk "$FPK" -e "$ENV_FILE" -v 1 2>&1'
+            ' | tr "\\r" "\\n" | grep -vE "installing|Verifying" | tail -3 >&9',
+            "sleep 2",
+            "started=0",
+            "n=0",
+            'while [ "$n" -lt 6 ]; do',
+            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting";'
+            " then started=1; break; fi",
+            '  appcenter-cli start "$APP_NAME" 2>&1 | tail -1 >&9',
+            "  sleep 3",
+            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting";'
+            " then started=1; break; fi",
+            "  n=$((n + 1))",
+            "done",
+            'if [ "$started" != "1" ]; then log "新版本未能启动，详见日志"; exit 1; fi',
+            'log "更新安装脚本结束"',
+            "",
+        ]
+        script = "\n".join(lines)
         with open(script_path, "w", encoding="utf-8") as handle:
             handle.write(script)
         os.chmod(script_path, 0o755)
+        # 立刻做一次 bash 语法检查：脚本要等面板重启后才执行，写坏了就只能靠人工
+        # 翻日志，这一步能把"拼串拼错"挡在下载完成之后、卸载之前。
+        check = subprocess.run(["/bin/bash", "-n", script_path],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if check.returncode != 0:
+            detail = (check.stderr or "").strip().splitlines()
+            RT.log("生成的升级脚本语法有误：%s" % (detail[:2] or check.returncode), level="error")
+            self.fail(500, "升级脚本生成失败（bash 语法校验未通过），已中止更新：%s"
+                      % (detail[0] if detail else check.returncode))
+            return
         RT.log("启动后台更新脚本，面板即将重启")
         subprocess.Popen(["/bin/bash", "-c",
                           "exec setsid \"%s\" >/dev/null 2>&1 < /dev/null &" % script_path],
