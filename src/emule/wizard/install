@@ -1,0 +1,68 @@
+[
+  {
+    "stepTitle": "面板端口",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "面板自身的访问端口（1-65535）。默认 17581 是特意挑的冷门 5 位端口，尽量避开 8899/8080/3000 这类常被别的应用占用的端口；装完发现冲突可以在这里改。安装完成后可从飞牛桌面图标直接打开，也可以用 http://设备IP:端口 访问。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_backend_port",
+        "label": "面板端口 (PANEL_PORT)",
+        "initValue": "17581",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入面板端口"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "端口必须是数字"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "stepTitle": "电驴网络端口",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "eD2k 的 TCP 与 UDP 端口，用于和电驴网络里的其他客户端直连。路由器上把这两个端口转发到本机可以获得 High ID，明显提升下载速度；不改也能用（Low ID）。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_tcp_port",
+        "label": "TCP 端口",
+        "initValue": "4662",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入 TCP 端口"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "端口必须是数字"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_udp_port",
+        "label": "UDP 端口",
+        "initValue": "4672",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入 UDP 端口"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "端口必须是数字"
+          }
+        ]
+      }
+    ]
+  }
+]

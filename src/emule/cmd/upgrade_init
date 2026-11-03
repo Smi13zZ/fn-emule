@@ -1,0 +1,6 @@
+#!/bin/bash
+### 升级前：停止服务
+set -u
+MAIN_SCRIPT="$(dirname "$0")/main"
+[ -x "${MAIN_SCRIPT}" ] && "${MAIN_SCRIPT}" stop >/dev/null 2>&1 || true
+exit 0

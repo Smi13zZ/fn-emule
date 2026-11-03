@@ -1,0 +1,1591 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>eMule 电驴</title>
+<link rel="icon" href="./images/icon.svg">
+<link rel="stylesheet" href="./style.css?v=26.11.0">
+</head>
+<body>
+<div id="app" v-cloak>
+<h2 class="sr-only">eMule eD2k / Kad download panel</h2>
+
+<div class="shell" :class="{ collapsed: collapsed }">
+
+  <!-- ============ sidebar (no brand block, footer buttons at the bottom) ============ -->
+  <aside class="side" :class="{ open: navOpen }">
+    <nav class="nav">
+      <button v-for="n in navItems" :key="n.id" class="nav-item"
+              :class="{ on: view === n.id }" :title="collapsed ? t(n.key) : n.label"
+              @click="go(n.id)">
+        <span class="ic" v-html="ic(n.icon)"></span>
+        <span class="label">{{ t(n.key) }}</span>
+        <span class="badge" v-if="n.id === 'tasks' && taskCount">{{ taskCount }}</span>
+        <i class="nav-alert" v-if="n.id === 'settings' && updateNew" role="img"
+           :title="t('settings.update.available', { v: updateInfo.latest })"
+           :aria-label="t('settings.update.available', { v: updateInfo.latest })"></i>
+      </button>
+    </nav>
+
+    <div class="side-foot">
+      <div class="foot-row">
+        <button class="icon-btn" @click="cycleTheme" :title="themeTooltip" :aria-label="themeTooltip">
+          <span v-html="ic(themeIcon)"></span>
+        </button>
+        <button class="icon-btn" @click="toggleLang" :title="t('side.lang')" :aria-label="t('side.lang')">
+          <span v-html="ic('lang')"></span>
+        </button>
+      </div>
+      <div class="ver-line" :title="t('app.name') + ' v' + appVersion">
+        <span class="ic" style="width:14px;height:14px;display:flex;align-items:center;justify-content:center" v-html="ic('globe')"></span>
+        <span class="mono">v{{ appVersion }}<template v-if="engineVersion"> · aMule {{ engineVersion }}</template></span>
+      </div>
+      <button class="icon-btn wide ghost collapse-btn" @click="toggleCollapse"
+              :title="collapsed ? t('side.expand') : t('side.collapse')"
+              :aria-label="collapsed ? t('side.expand') : t('side.collapse')">
+        <span v-html="ic(collapsed ? 'expand' : 'collapse')"></span>
+      </button>
+    </div>
+  </aside>
+  <div class="mask" v-if="navOpen" @click="navOpen = false"
+       style="justify-content:flex-start;background:rgba(0,0,0,.4)"></div>
+
+  <!-- ============ main ============ -->
+  <div class="main">
+    <header class="topbar">
+      <button class="icon-btn ghost mobile-only" @click="navOpen = !navOpen" :title="t('side.menu')"
+              :aria-label="t('side.menu')">
+        <span v-html="ic('menu')"></span>
+      </button>
+      <div class="page-title">{{ pageTitle }}</div>
+      <div class="spacer"></div>
+
+      <span class="chip hide-sm" v-if="overview.ed2k && overview.ed2k.server" :title="serverAddr()">
+        <span class="mono">{{ overview.ed2k.server.name }}</span>
+      </span>
+
+      <span class="chip" :class="{ err: !connOK }" :title="connError || t('top.connected')">
+        <i class="dot" :class="connOK ? 'on' : 'err'"></i>
+        <span class="hide-sm">{{ engineDown ? t('top.offline') : (connOK ? t('top.connected') : t('top.disconnected')) }}</span>
+      </span>
+
+      <button class="icon-btn" @click="refresh(true)" :disabled="busy" :title="t('top.refresh')"
+              :aria-label="t('top.refresh')">
+        <span v-html="ic('refresh')"></span>
+      </button>
+    </header>
+
+    <div class="content">
+
+      <!-- ---------- engine offline / EC down banner ---------- -->
+      <div class="engbar" v-if="engineDown || ecDown">
+        <span class="ic" v-html="ic('plug')"></span>
+        <div class="engbar-text">
+          <b>{{ engineDown ? (engineStarting ? t('engine.banner.starting') : t('engine.banner.title')) : t('engine.banner.ecdown') }}</b>
+          <span>{{ engineDown ? engineBannerText : serverAddr() }}</span>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn primary" :disabled="coreStarting" @click="startEngine">
+          <span class="ic" v-html="ic(coreStarting ? 'refresh' : 'play')"></span>
+          {{ coreStarting ? t('engine.banner.starting') : t('engine.banner.nostart') }}
+        </button>
+      </div>
+
+      <!-- ---------- panel backend unreachable ---------- -->
+      <div class="engbar" v-if="panelDown">
+        <span class="ic" v-html="ic('plug')"></span>
+        <div class="engbar-text">
+          <b>{{ t('err.network') }}</b>
+          <span>{{ t('engine.banner.panelDown') }}</span>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn" @click="bootstrapPanel">
+          <span class="ic" v-html="ic('refresh')"></span>{{ t('top.refresh') }}
+        </button>
+      </div>
+
+      <!-- ================= OVERVIEW ================= -->
+      <template v-if="view === 'dash'">
+        <div class="grid c4" v-if="loaded">
+          <div class="stat">
+            <div class="k"><span class="ic" v-html="ic('down')"></span>{{ t('overview.dl') }}</div>
+            <div class="v dl">{{ fmt.fmtSpeed(speed.down) }}</div>
+            <div class="s">{{ t('overview.session', { v: fmt.fmtBytes(session.down) }) }}</div>
+          </div>
+          <div class="stat">
+            <div class="k"><span class="ic" v-html="ic('up')"></span>{{ t('overview.ul') }}</div>
+            <div class="v ul">{{ fmt.fmtSpeed(speed.up) }}</div>
+            <div class="s">{{ t('overview.session', { v: fmt.fmtBytes(session.up) }) }}</div>
+          </div>
+          <div class="stat">
+            <div class="k"><span class="ic" v-html="ic('list')"></span>{{ t('overview.active') }}</div>
+            <div class="v">{{ fmt.fmtNum(counters.downloads_active) }}</div>
+            <div class="s">{{ t('overview.activeSub', { q: fmt.fmtNum(counters.downloads_waiting), p: fmt.fmtNum(counters.downloads_paused) }) }}</div>
+          </div>
+          <div class="stat">
+            <div class="k"><span class="ic" v-html="ic('hdd')"></span>{{ t('overview.disk') }}</div>
+            <div class="v">{{ disk.free ? fmt.fmtBytes(disk.free) : '—' }}</div>
+            <div class="s">{{ disk.total ? t('overview.diskOf', { v: fmt.fmtBytes(disk.total) }) : (disk.path || '—') }}</div>
+          </div>
+        </div>
+        <div class="grid c4" v-else>
+          <div class="stat sk-card" v-for="i in 4" :key="i">
+            <div class="sk sk-line w40"></div><div class="sk sk-line w80" style="height:22px"></div>
+            <div class="sk sk-line w60"></div>
+          </div>
+        </div>
+
+        <div class="grid c2" style="margin-top:var(--gap)">
+          <!-- eD2k -->
+          <div class="card">
+            <div class="card-head">
+              <h3>{{ t('overview.ed2k') }}</h3>
+              <div class="spacer"></div>
+              <span class="chip" :class="ed2k.connected ? 'ok' : 'err'">
+                <i class="dot" :class="ed2k.connected ? 'on' : 'err'"></i>
+                {{ ed2k.connected ? t('top.connected') : t('top.disconnected') }}
+              </span>
+            </div>
+            <dl class="kv">
+              <dt>{{ t('overview.server') }}</dt>
+              <dd>
+                <template v-if="ed2k.server">
+                  {{ ed2k.server.name }} <span class="mono faint">· {{ ed2k.server.ip }}:{{ ed2k.server.port }}</span>
+                </template>
+                <span v-else class="faint">{{ t('overview.noServer') }}</span>
+              </dd>
+              <dt>{{ t('overview.id') }}</dt>
+              <dd>
+                <span class="chip" :class="ed2k.low_id ? 'warn' : 'ok'">
+                  {{ ed2k.low_id ? t('overview.idLow') : t('overview.idHigh') }}
+                </span>
+              </dd>
+              <dt>{{ t('overview.sources') }}</dt><dd class="mono">{{ fmt.fmtNum(counters.sources) }}</dd>
+              <dt>{{ t('overview.queue') }}</dt><dd class="mono">{{ fmt.fmtNum(counters.queue) }}</dd>
+              <dt>{{ t('overview.connections') }}</dt><dd class="mono">{{ fmt.fmtNum(counters.connections) }}</dd>
+            </dl>
+          </div>
+
+          <!-- Kad -->
+          <div class="card">
+            <div class="card-head">
+              <h3>{{ t('overview.kad') }}</h3>
+              <div class="spacer"></div>
+              <span class="chip" :class="kad.connected ? (kad.firewalled ? 'warn' : 'ok') : 'err'">
+                <i class="dot" :class="kad.connected ? (kad.firewalled ? 'warn' : 'on') : 'err'"></i>
+                {{ kad.connected ? (kad.firewalled ? t('overview.firewalled') : t('overview.open')) : t('top.disconnected') }}
+              </span>
+            </div>
+            <dl class="kv">
+              <dt>{{ t('overview.nodes') }}</dt><dd class="mono">{{ fmt.fmtNum(kad.nodes) }}</dd>
+              <dt>{{ t('overview.users') }}</dt><dd class="mono">{{ fmt.fmtNum(kad.users) }}</dd>
+              <dt>{{ t('overview.files') }}</dt><dd class="mono">{{ fmt.fmtNum(kad.files) }}</dd>
+              <dt>{{ t('overview.uptime') }}</dt><dd class="mono">{{ fmt.fmtDuration(engine.uptime) }}</dd>
+            </dl>
+          </div>
+        </div>
+
+        <div class="grid c2" style="margin-top:var(--gap)">
+          <div class="card">
+            <div class="card-head">
+              <h3>{{ t('overview.realtime') }}</h3>
+              <div class="spacer"></div>
+              <span class="legend"><i class="dot" style="background:var(--dl)"></i>{{ t('overview.legendDl') }}</span>
+              <span class="legend"><i class="dot" style="background:var(--ul)"></i>{{ t('overview.legendUl') }}</span>
+            </div>
+            <div class="chart-box" style="height:150px"><canvas ref="speedCanvas"></canvas></div>
+          </div>
+          <div class="card">
+            <h3>{{ t('overview.distribution') }}</h3>
+            <div class="row" style="gap:18px;align-items:center">
+              <div style="width:132px;height:132px;flex:0 0 132px">
+                <canvas ref="donutCanvas"></canvas>
+              </div>
+              <div style="flex:1;min-width:0">
+                <div class="row" v-for="seg in statusSegments" :key="seg.key" style="padding:5px 0">
+                  <i class="dot" :style="{ background: seg.color }"></i>
+                  <span class="ellipsis">{{ seg.label }}</span>
+                  <div class="spacer"></div>
+                  <b class="mono">{{ seg.value }}</b>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:var(--gap)">
+          <div class="card-head">
+            <h3>{{ t('overview.recentLogs') }}</h3>
+            <div class="spacer"></div>
+            <button class="btn sm" @click="go('logs')">{{ t('overview.viewAll') }}</button>
+          </div>
+          <div class="faint" v-if="!recentLogs.length" style="padding:6px 0">{{ t('overview.noLogs') }}</div>
+          <div class="logline" v-for="(l, i) in recentLogs" :key="'rl' + i" :class="l.level">
+            <span class="t mono">{{ fmt.fmtDateMin(l.t) }}</span>
+            <span class="m">{{ l.text }}</span>
+          </div>
+        </div>
+      </template>
+
+      <!-- ================= TASKS ================= -->
+      <template v-if="view === 'tasks'">
+        <div class="toolbar tbar-tasks">
+          <div class="seg tseg tkindseg">
+            <button v-for="k in kinds" :key="k" :class="{ on: kind === k }" @click="switchKind(k)">
+              {{ t('tasks.tab.' + k) }}
+            </button>
+          </div>
+          <input class="input tsearch" v-model="search" :placeholder="t('tasks.search')">
+          <div class="seg tseg tfilterseg">
+            <button v-for="f in filters" :key="f" :class="{ on: filter === f }" @click="filter = f">
+              <span class="hide-xs">{{ t('tasks.filter.' + f) }}</span>
+              <span class="show-xs">{{ t('tasks.filterShort.' + f) }}</span>
+            </button>
+          </div>
+          <div class="tsort">
+            <select v-if="!isMobile" class="select" v-model="sortKey" style="width:132px"
+                    :aria-label="t('tasks.sortTitle')">
+              <option v-for="k in sortKeys" :key="k" :value="k">{{ t('tasks.sort.' + k) }}</option>
+            </select>
+            <button v-else type="button" class="select picker-trigger tsort-pick"
+                    @click="openPicker({
+                      title: t('tasks.sortTitle'),
+                      value: sortKey,
+                      options: sortKeys.map(function (k) { return { value: k, label: t('tasks.sort.' + k) }; }),
+                      onPick: (v) => { sortKey = v; }
+                    })"><span class="v">{{ t('tasks.sort.' + sortKey) }}</span></button>
+            <button class="icon-btn tsort-dir" @click="sortAsc = !sortAsc"
+                    :title="sortAsc ? t('tasks.sortAsc') : t('tasks.sortDesc')"
+                    :aria-label="sortAsc ? t('tasks.sortAsc') : t('tasks.sortDesc')">
+              <span v-html="ic(sortAsc ? 'sortAsc' : 'sortDesc')"></span>
+            </button>
+          </div>
+          <div class="spacer"></div>
+          <button class="btn primary tadd" @click="openAdd">
+            <span class="ic" v-html="ic('plus')"></span>{{ t('tasks.add') }}
+          </button>
+          <i class="tbreak" aria-hidden="true"></i>
+        </div>
+
+        <div class="toolbar" v-if="selection.length">
+          <span class="chip">{{ t('tasks.selected', { n: selection.length }) }}</span>
+          <button class="btn sm" @click="bulk('pause')">{{ t('tasks.pause') }}</button>
+          <button class="btn sm" @click="bulk('resume')">{{ t('tasks.resume') }}</button>
+          <button class="btn sm danger" @click="askCancel(selectedTasks)">{{ t('tasks.cancel') }}</button>
+          <div class="spacer"></div>
+          <button class="btn sm" @click="selection = []">{{ t('tasks.clearSel') }}</button>
+        </div>
+
+        <div class="card flush">
+          <!-- loading skeleton on first paint -->
+          <div class="sk-rows" v-if="!loaded">
+            <div class="sk sk-line w80" v-for="i in 6" :key="'sk' + i"></div>
+          </div>
+
+          <template v-else-if="kind === 'download'">
+            <div v-if="!isMobile" class="tscroll">
+              <table class="ttable tlist">
+                <thead>
+                  <tr>
+                    <th style="width:38px">
+                      <input type="checkbox" :checked="allSelected" @change="toggleAll($event.target.checked)"
+                             :aria-label="t('tasks.selected', { n: selection.length })">
+                    </th>
+                    <th class="sortable" @click="setSort('name')">{{ t('table.name') }}</th>
+                    <th class="num sortable" style="width:96px" @click="setSort('size')">{{ t('table.size') }}</th>
+                    <th class="sortable" style="width:132px" @click="setSort('percent')">{{ t('table.progress') }}</th>
+                    <th class="num sortable hide-sm" style="width:108px" @click="setSort('speed')">{{ t('table.speed') }}</th>
+                    <th class="num hide-sm" style="width:104px">{{ t('table.sources') }}</th>
+                    <th style="width:96px">{{ t('table.priority') }}</th>
+                    <th class="num sortable hide-md" style="width:96px" @click="setSort('eta')">{{ t('table.eta') }}</th>
+                    <th class="hide-md" style="width:86px">{{ t('table.status') }}</th>
+                    <th class="acts" style="width:80px"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="it in visibleTasks" :key="it.hash" :class="{ sel: selection.indexOf(it.hash) >= 0 }">
+                    <td><input type="checkbox" :value="it.hash" v-model="selection"></td>
+                    <td>
+                      <div class="name ellipsis" style="cursor:pointer" @click="openDetail(it.hash)" :title="it.name">{{ it.name }}</div>
+                      <div class="sub">
+                        <span v-if="it.category">· {{ it.category }}</span>
+                        <span v-if="it.added">· {{ fmt.fmtDateMin(it.added) }}</span>
+                      </div>
+                    </td>
+                    <td class="num mono">{{ fmt.fmtBytes(it.size) }}</td>
+                    <td>
+                      <div class="progress" :class="progressClass(it)">
+                        <i :style="{ width: Math.max(0, Math.min(100, it.percent * 100)) + '%' }"></i>
+                      </div>
+                      <div class="faint mono pmeta">{{ fmt.fmtPercent(it.percent) }} · {{ fmt.fmtBytes(it.done) }}</div>
+                    </td>
+                    <td class="num hide-sm mono">
+                      <span class="arrow-dl" v-if="it.speed">↓ {{ fmt.fmtSpeed(it.speed) }}</span>
+                      <span class="faint" v-else>{{ fmt.fmtSpeed(0) }}</span>
+                    </td>
+                    <td class="num hide-sm mono">{{ fmt.fmtSources(it.sources) }}</td>
+                    <td>
+                      <select v-if="!isMobile" class="select" style="height:28px;font-size:12px;padding:0 22px 0 8px"
+                              :value="it.priority" @change="setPriority(it, $event.target.value)">
+                        <option v-for="p in priorities" :key="p" :value="p">{{ t('priority.' + p) }}</option>
+                      </select>
+                      <button v-else type="button" class="select picker-trigger"
+                              style="height:28px;font-size:12px" @click="openPicker({
+                                title: t('table.priority'),
+                                value: it.priority,
+                                options: priorities.map(function (p) { return { value: p, label: t('priority.' + p) }; }),
+                                onPick: (v) => setPriority(it, v)
+                              })"><span class="v">{{ t('priority.' + fmt.fmtPriority(it.priority)) }}</span></button>
+                    </td>
+                    <td class="num hide-md mono">{{ it.percent >= 1 ? '—' : fmt.fmtEta(it.eta) }}</td>
+                    <td class="hide-md">
+                      <span class="chip" :style="{ color: fmt.toneColor(stLabel(it.status).tone) }">{{ stLabel(it.status).label }}</span>
+                    </td>
+                    <td class="acts">
+                      <button class="btn sm icon" @click="togglePause(it)"
+                              :title="fmt.isPaused(it) ? t('tasks.resume') : t('tasks.pause')"
+                              :aria-label="fmt.isPaused(it) ? t('tasks.resume') : t('tasks.pause')">
+                        <span v-html="ic(fmt.isPaused(it) ? 'play' : 'pause')"></span>
+                      </button>
+                      <button class="btn sm icon danger" @click="askCancel([it])" :title="t('tasks.cancel')"
+                              :aria-label="t('tasks.cancel')">
+                        <span v-html="ic('trash')"></span>
+                      </button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- phone: one card per transfer -->
+            <div v-else class="tcards">
+              <div class="tcard" v-for="it in visibleTasks" :key="it.hash"
+                   :class="{ sel: selection.indexOf(it.hash) >= 0 }">
+                <div class="row" style="align-items:flex-start;gap:9px">
+                  <input type="checkbox" :value="it.hash" v-model="selection" style="margin-top:4px">
+                  <div style="flex:1;min-width:0">
+                    <div class="tname ellipsis" style="font-weight:500;cursor:pointer" @click="openDetail(it.hash)" :title="it.name">{{ it.name }}</div>
+                    <div class="sub">
+                      <span :style="{ color: fmt.toneColor(stLabel(it.status).tone) }">{{ stLabel(it.status).label }}</span>
+                      <span v-if="it.category">· {{ it.category }}</span>
+                    </div>
+                  </div>
+                  <div class="row" style="gap:5px">
+                    <button class="btn sm icon" @click="togglePause(it)" :title="t('tasks.pause')">
+                      <span v-html="ic(fmt.isPaused(it) ? 'play' : 'pause')"></span>
+                    </button>
+                    <button class="btn sm icon danger" @click="askCancel([it])" :title="t('tasks.cancel')">
+                      <span v-html="ic('trash')"></span>
+                    </button>
+                  </div>
+                </div>
+                <div class="progress" :class="progressClass(it)" style="margin-top:11px">
+                  <i :style="{ width: Math.max(0, Math.min(100, it.percent * 100)) + '%' }"></i>
+                </div>
+                <div class="tcmeta">
+                  <span class="mono">{{ fmt.fmtPercent(it.percent) }}</span>
+                  <span class="faint">·</span>
+                  <span class="mono faint">{{ fmt.fmtBytes(it.done) }} / {{ fmt.fmtBytes(it.size) }}</span>
+                </div>
+                <div class="tcmeta">
+                  <span class="arrow-dl mono" v-if="it.speed">↓ {{ fmt.fmtSpeed(it.speed) }}</span>
+                  <span class="faint mono" v-if="!it.speed">{{ fmt.fmtSpeed(0) }}</span>
+                  <div class="spacer"></div>
+                  <span class="faint mono">{{ t('table.sources') }} {{ fmt.fmtSources(it.sources) }}</span>
+                  <span class="faint mono">{{ fmt.fmtEta(it.eta) }}</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="empty" v-if="loaded && !visibleTasks.length">
+              <span class="big" v-html="ic('list')"></span>
+              <span>{{ tasks.length ? t('tasks.noMatch') : t('tasks.empty') }}</span>
+            </div>
+          </template>
+
+          <!-- uploads: much simpler table -->
+          <template v-else>
+            <div class="tscroll">
+              <table class="ttable tlist" style="min-width:640px">
+                <thead>
+                  <tr>
+                    <th class="sortable" @click="setSort('name')">{{ t('table.name') }}</th>
+                    <th class="num sortable" style="width:110px" @click="setSort('size')">{{ t('table.size') }}</th>
+                    <th class="num" style="width:130px">{{ t('shared.transferred') }}</th>
+                    <th class="num hide-sm" style="width:120px">{{ t('table.speed') }}</th>
+                    <th class="num hide-md" style="width:96px">{{ t('detail.sourceQueue') }}</th>
+                    <th class="hide-sm" style="width:100px">{{ t('table.status') }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="it in visibleTasks" :key="it.hash">
+                    <td>
+                      <div class="name ellipsis" style="cursor:pointer" @click="openDetail(it.hash)" :title="it.name">{{ it.name }}</div>
+                      <div class="sub">
+                        <span class="mono">{{ it.hash.slice(0, 8) }}</span>
+                        <span v-if="clientLabel(it)">{{ clientLabel(it) }}</span>
+                      </div>
+                    </td>
+                    <td class="num mono">{{ fmt.fmtBytes(it.size) }}</td>
+                    <td class="num mono">{{ fmt.fmtBytes(uploadedOf(it)) }}</td>
+                    <td class="num hide-sm mono">{{ fmt.fmtSpeed(it.speed) }}</td>
+                    <td class="num hide-md mono">{{ queueOf(it) }}</td>
+                    <td class="hide-sm">
+                      <span class="chip" :style="{ color: fmt.toneColor(stLabel(it.status).tone) }">{{ stLabel(it.status).label }}</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="empty" v-if="loaded && !visibleTasks.length">
+              <span class="big" v-html="ic('up')"></span>
+              <span>{{ t('tasks.emptyUpload') }}</span>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- ================= SERVERS ================= -->
+      <template v-if="view === 'servers'">
+        <div class="curbar">
+          <span class="big">{{ t('servers.current') }}</span>
+          <template v-if="serversData.current">
+            <span class="mono">{{ serversData.current.name }}</span>
+            <span class="mono faint">{{ serversData.current.ip }}:{{ serversData.current.port }}</span>
+            <span class="chip" :class="serversData.ed2k_connected ? 'ok' : 'err'">
+              <i class="dot" :class="serversData.ed2k_connected ? 'on' : 'err'"></i>
+              {{ serversData.ed2k_connected ? t('top.connected') : t('top.disconnected') }}
+            </span>
+          </template>
+          <span class="faint" v-else>{{ t('servers.none') }}</span>
+          <div class="spacer"></div>
+          <span class="chip">{{ t('servers.total', { n: serversData.total || 0 }) }}</span>
+          <span class="chip">{{ t('servers.working', { n: serversData.working || 0 }) }}</span>
+          <button class="btn" :disabled="serversUpdating" @click="updateServerMet">
+            <span class="ic" v-html="ic(serversUpdating ? 'refresh' : 'download')"></span>
+            {{ serversUpdating ? t('servers.updating') : t('servers.update') }}
+          </button>
+          <button class="btn primary" @click="openServerForm">
+            <span class="ic" v-html="ic('plus')"></span>{{ t('servers.add') }}
+          </button>
+        </div>
+
+        <div class="card flush" v-if="serversData.items && serversData.items.length">
+          <div class="tscroll">
+            <table class="ttable tservers">
+              <thead>
+                <tr>
+                  <th>{{ t('servers.name') }}</th>
+                  <th style="width:168px">{{ t('servers.address') }}</th>
+                  <th class="num" style="width:104px">{{ t('servers.users') }}</th>
+                  <th class="num hide-md" style="width:116px">{{ t('servers.files') }}</th>
+                  <th style="width:126px">{{ t('servers.priority') }}</th>
+                  <th class="num hide-sm" style="width:92px">{{ t('servers.ping') }}</th>
+                  <th class="hide-sm" style="width:104px">{{ t('servers.status') }}</th>
+                  <th class="acts" style="width:168px"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="s in serversData.items" :key="s.ip + ':' + s.port"
+                    :class="{ sel: isCurrent(s) }">
+                  <td>
+                    <div class="row" style="gap:7px">
+                      <b class="ellipsis" :title="s.name || s.ip">{{ s.name || s.ip }}</b>
+                      <span class="chip ok" v-if="isCurrent(s)">{{ t('servers.connected') }}</span>
+                    </div>
+                    <div class="sub" v-if="s.desc">{{ s.desc }}</div>
+                  </td>
+                  <td class="mono">{{ s.ip }}:{{ s.port }}</td>
+                  <td class="num mono">{{ fmt.fmtNum(s.users) }}</td>
+                  <td class="num mono hide-md">{{ fmt.fmtNum(s.files) }}</td>
+                  <td>
+                    <select v-if="!isMobile" class="select" style="height:28px;font-size:12px;padding:0 22px 0 8px"
+                            :value="s.priority" @change="setServerPriority(s, $event.target.value)"
+                            :aria-label="t('servers.priority')">
+                      <option v-for="p in priorities" :key="p" :value="p">{{ t('priority.' + p) }}</option>
+                    </select>
+                    <button v-else type="button" class="select picker-trigger" style="height:28px;font-size:12px"
+                            @click="openPicker({
+                              title: t('servers.priority'),
+                              value: s.priority,
+                              options: priorities.map(function (p) { return { value: p, label: t('priority.' + p) }; }),
+                              onPick: (v) => setServerPriority(s, v)
+                            })"><span class="v">{{ t('priority.' + fmt.fmtPriority(s.priority)) }}</span></button>
+                  </td>
+                  <td class="num hide-sm mono">{{ s.ping ? t('servers.pingMs', { v: s.ping }) : '—' }}</td>
+                  <td class="hide-sm statuscell">
+                    <span class="chip" :class="s.failed ? 'err' : 'ok'">
+                      {{ s.failed ? t('servers.failed') : t('servers.online') }}
+                    </span>
+                  </td>
+                  <td class="acts">
+                    <button class="btn sm" :disabled="connectingKey === s.ip + ':' + s.port"
+                            @click="connectServer(s)">
+                      {{ connectingKey === s.ip + ':' + s.port ? t('servers.connecting') : t('servers.connect') }}
+                    </button>
+                    <button class="btn sm icon danger" @click="askRemoveServer(s)" :title="t('servers.remove')"
+                            :aria-label="t('servers.remove')">
+                      <span v-html="ic('trash')"></span>
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card" v-else>
+          <div class="empty">
+            <span class="big" v-html="ic('servers')"></span>
+            <span>{{ t('servers.empty') }}</span>
+            <span class="faint" style="max-width:420px">{{ t('servers.emptyHint') }}</span>
+            <button class="btn primary" style="margin-top:6px" :disabled="serversUpdating" @click="updateServerMet">
+              <span class="ic" v-html="ic('download')"></span>{{ t('servers.update') }}
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- ================= SEARCH ================= -->
+      <template v-if="view === 'search'">
+        <div class="card">
+          <div class="card-head"><h3>{{ t('search.title') }}</h3></div>
+          <div class="searchbar">
+            <input class="input" v-model="query" :placeholder="t('search.placeholder')"
+                   @keyup.enter="startSearch">
+            <div class="seg">
+              <button v-for="k in searchKinds" :key="k" :class="{ on: searchKind === k }" @click="searchKind = k">
+                {{ t('search.kind.' + k) }}
+              </button>
+            </div>
+            <div class="seg">
+              <button v-for="mth in searchMethods" :key="mth" :class="{ on: searchMethod === mth }"
+                      @click="searchMethod = mth">{{ t('search.method.' + mth) }}</button>
+            </div>
+            <button class="btn primary" v-if="!searchRunning" @click="startSearch">
+              <span class="ic" v-html="ic('search')"></span>{{ t('search.start') }}
+            </button>
+            <button class="btn danger" v-else @click="stopSearch">{{ t('search.stop') }}</button>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:var(--gap)" v-if="searchRunning || searchProgress">
+          <div class="search-progress">
+            <div class="progress"><i :style="{ width: Math.max(3, Math.min(100, searchProgress)) + '%' }"></i></div>
+            <span class="mono faint">{{ t('search.running', { v: searchProgress }) }}</span>
+          </div>
+          <div class="hint">{{ query }}</div>
+        </div>
+
+        <div class="card flush" style="margin-top:var(--gap)">
+          <div class="card-head" style="padding:14px 16px 0">
+            <h3>{{ t('search.results') }}</h3>
+            <div class="spacer"></div>
+            <span class="chip" v-if="searchResults.length">{{ t('search.count', { n: searchResults.length }) }}</span>
+            <button class="btn sm" v-if="searchResults.length" @click="toggleAllResults">
+              {{ allResultsSelected ? t('tasks.clearSel') : t('search.selectAll') }}
+            </button>
+            <button class="btn sm primary" v-if="selectedResults.length" :disabled="downloadingResults"
+                    @click="downloadSelectedResults">
+              {{ t('search.downloadAll') }} ({{ selectedResults.length }})
+            </button>
+          </div>
+          <div class="tscroll">
+            <table class="ttable tssearch" v-if="searchResults.length">
+              <thead>
+                <tr>
+                  <th style="width:38px"></th>
+                  <th>{{ t('search.name') }}</th>
+                  <th class="num" style="width:104px">{{ t('search.size') }}</th>
+                  <th class="num" style="width:88px">{{ t('search.sources') }}</th>
+                  <th style="width:88px">{{ t('search.type') }}</th>
+                  <th class="hide-sm" style="width:120px">{{ t('search.hash') }}</th>
+                  <th class="acts" style="width:104px"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in searchResults" :key="r.hash" :class="{ sel: resultSelection.indexOf(r.hash) >= 0 }">
+                  <td>
+                    <input type="checkbox" :value="r.hash" v-model="resultSelection" :disabled="r.already">
+                  </td>
+                  <td>
+                    <div class="ellipsis" style="font-weight:500" :title="r.name">{{ r.name }}</div>
+                    <div class="sub">
+                      <span v-if="r.percent">{{ fmt.fmtPercent(r.percent, 0) }}</span>
+                      <span v-if="r.already" class="chip ok">{{ t('search.already') }}</span>
+                    </div>
+                  </td>
+                  <td class="num mono">{{ fmt.fmtBytes(r.size) }}</td>
+                  <td class="num mono">{{ fmt.fmtNum(r.sources) }}</td>
+                  <td><span class="chip mono">{{ r.type || r.ext || '—' }}</span></td>
+                  <td class="hide-sm sres-hash" :title="r.hash">{{ String(r.hash).slice(0, 16) }}</td>
+                  <td class="acts">
+                    <button class="btn sm" :disabled="r.already || r.adding" @click="downloadResult(r)">
+                      {{ r.already ? t('search.added') : (r.adding ? t('search.running', { v: 0 }) : t('search.download')) }}
+                    </button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="empty" v-else>
+              <span class="big" v-html="ic('search')"></span>
+              <span>{{ searchStarted ? t('search.noResults') : t('search.empty') }}</span>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- ================= SHARED ================= -->
+      <template v-if="view === 'shared'">
+        <div class="toolbar">
+          <span class="chip">{{ t('shared.total', { n: sharedData.total || (sharedData.items || []).length }) }}</span>
+          <div class="spacer"></div>
+          <button class="btn" :disabled="sharedReloading" @click="reloadShared">
+            <span class="ic" v-html="ic(sharedReloading ? 'refresh' : 'list')"></span>
+            {{ sharedReloading ? t('shared.reloading') : t('shared.reload') }}
+          </button>
+        </div>
+        <div class="card flush" v-if="sharedData.items && sharedData.items.length">
+          <div class="tscroll">
+            <table class="ttable tsshared">
+              <thead>
+                <tr>
+                  <th>{{ t('shared.name') }}</th>
+                  <th class="num" style="width:104px">{{ t('shared.size') }}</th>
+                  <th style="width:84px">{{ t('shared.type') }}</th>
+                  <th class="num hide-sm" style="width:92px">{{ t('shared.requests') }}</th>
+                  <th class="num hide-sm" style="width:92px">{{ t('shared.accepted') }}</th>
+                  <th class="num" style="width:110px">{{ t('shared.transferred') }}</th>
+                  <th class="hide-md" style="width:220px">{{ t('shared.path') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="f in sharedData.items" :key="f.hash">
+                  <td>
+                    <div class="ellipsis" style="font-weight:500" :title="f.name">{{ f.name }}</div>
+                    <div class="sub mono">{{ String(f.hash).slice(0, 8) }}</div>
+                  </td>
+                  <td class="num mono">{{ fmt.fmtBytes(f.size) }}</td>
+                  <td><span class="chip mono">{{ f.type || '—' }}</span></td>
+                  <td class="num mono hide-sm">{{ fmt.fmtNum(f.requests_all !== undefined ? f.requests_all : f.requests) }}</td>
+                  <td class="num mono hide-sm">{{ fmt.fmtNum(f.accepts_all !== undefined ? f.accepts_all : (f.accepts !== undefined ? f.accepts : f.accepted)) }}</td>
+                  <td class="num mono">{{ fmt.fmtBytes(f.xferred_all !== undefined ? f.xferred_all : (f.xferred !== undefined ? f.xferred : f.transferred)) }}</td>
+                  <td class="hide-md pathcell" :title="f.path">{{ f.path }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card" v-else>
+          <div class="empty">
+            <span class="big" v-html="ic('folder')"></span>
+            <span>{{ t('shared.empty') }}</span>
+            <span class="faint" style="max-width:440px">{{ t('shared.emptyHint') }}</span>
+            <button class="btn primary" style="margin-top:6px" @click="goSettingsTab('dirs')">
+              {{ t('shared.goSettings') }}
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- ================= STATS ================= -->
+      <template v-if="view === 'stats'">
+        <div class="grid c3">
+          <div class="stat">
+            <div class="k">{{ t('stats.sessionDl') }}</div>
+            <div class="v dl">{{ fmt.fmtBytes(session.down) }}</div>
+            <div class="s">{{ fmt.fmtSpeed(speed.down) }}</div>
+          </div>
+          <div class="stat">
+            <div class="k">{{ t('stats.sessionUl') }}</div>
+            <div class="v ul">{{ fmt.fmtBytes(session.up) }}</div>
+            <div class="s">{{ fmt.fmtSpeed(speed.up) }}</div>
+          </div>
+          <div class="stat">
+            <div class="k">{{ t('stats.kadNodes') }}</div>
+            <div class="v">{{ fmt.fmtNum(kad.nodes) }}</div>
+            <div class="s">{{ kad.connected ? (kad.firewalled ? t('overview.firewalled') : t('overview.open')) : t('top.disconnected') }}</div>
+          </div>
+        </div>
+
+        <div class="card" style="margin-top:var(--gap)">
+          <div class="card-head">
+            <h3>{{ t('stats.curve') }}</h3>
+            <div class="spacer"></div>
+            <span class="legend"><i class="dot" style="background:var(--dl)"></i>{{ t('overview.legendDl') }}</span>
+            <span class="legend"><i class="dot" style="background:var(--ul)"></i>{{ t('overview.legendUl') }}</span>
+          </div>
+          <div class="chart-box" style="height:200px"><canvas ref="statsCanvas"></canvas></div>
+        </div>
+
+        <div class="grid c2" style="margin-top:var(--gap)" v-if="statsGroups.length">
+          <div class="card" v-for="g in statsGroups" :key="g.key">
+            <h3>{{ g.label }}</h3>
+            <!-- fixed layout: the metric column takes the remaining width, the
+                 value column is pinned and right aligned; long aMule names wrap
+                 inside the cell instead of pushing the table sideways -->
+            <table class="ttable sttable">
+              <colgroup><col><col class="stvalcol"></colgroup>
+              <thead>
+                <tr>
+                  <th>{{ t('stats.column.name') }}</th>
+                  <th class="num">{{ t('stats.column.value') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(row, i) in g.items" :key="g.key + i">
+                  <td class="stname">{{ statName(row) }}</td>
+                  <td class="num stval">{{ statValue(row) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card" style="margin-top:var(--gap)" v-else>
+          <div class="empty">{{ statsLoading ? t('msg.loading') : t('stats.noData') }}</div>
+        </div>
+      </template>
+
+      <!-- ================= LOGS ================= -->
+      <template v-if="view === 'logs'">
+        <div class="toolbar">
+          <div class="seg">
+            <button v-for="s in logSources" :key="s" :class="{ on: logSource === s }" @click="logSource = s">
+              {{ t('logs.source.' + s) }}
+            </button>
+          </div>
+          <div class="seg">
+            <button v-for="lv in logLevels" :key="lv" :class="{ on: logLevel === lv }" @click="logLevel = lv">
+              {{ t('logs.level.' + lv) }}
+            </button>
+          </div>
+          <div class="spacer"></div>
+          <label class="switch"><input type="checkbox" v-model="logAuto"> {{ t('logs.auto') }}</label>
+          <button class="icon-btn" @click="jumpToLogEnd" :title="t('logs.bottom')" :aria-label="t('logs.bottom')">
+            <span v-html="ic('down')"></span>
+          </button>
+          <button class="btn sm" :disabled="logsLoading" @click="loadLogs()">
+            {{ logsLoading ? t('msg.loading') : t('logs.refresh') }}
+          </button>
+          <button class="btn sm danger" @click="clearLogs">{{ t('logs.clear') }}</button>
+        </div>
+        <div class="card logbox" ref="logBox" style="max-height:70vh;overflow:auto">
+          <div v-for="(l, i) in visibleLogs" :key="'lg' + i" class="logline" :class="l.level">
+            <span class="t">
+              <span class="d">{{ fmt.fmtDate(l.t).slice(0, 10) }}</span>
+              <span class="h">{{ fmt.fmtClock(l.t) }}</span>
+            </span>
+            <span class="lvlbadge" :class="l.level">{{ l.level }}</span>
+            <span class="m">{{ l.text }}</span>
+          </div>
+          <div class="empty" v-if="!visibleLogs.length">
+            {{ logsLoading ? t('logs.loading') : t('logs.empty') }}
+          </div>
+        </div>
+        <div class="metaline" style="margin-top:10px">
+          <span>{{ t('logs.count', { n: visibleLogs.length }) }}</span>
+          <span v-if="logAuto" class="faint">· {{ t('logs.auto') }}</span>
+        </div>
+      </template>
+
+
+      <!-- ================= DIAGNOSTICS ================= -->
+      <template v-if="view === 'diagnostics'">
+        <!-- first paint: skeleton -->
+        <div class="card sk-card" v-if="diagLoading && !diag">
+          <div class="sk sk-line w40" style="height:20px"></div>
+          <div class="sk sk-line w80"></div>
+          <div class="sk sk-line w60"></div>
+        </div>
+
+        <!-- failed: error card with retry -->
+        <div class="card" v-else-if="diagError && !diag">
+          <div class="empty">
+            <span class="big" v-html="ic('plug')"></span>
+            <span>{{ t('diag.error', { v: diagError }) }}</span>
+            <button class="btn primary" style="margin-top:8px" :disabled="diagLoading" @click="loadDiagnostics(true)">
+              <span class="ic" v-html="ic('refresh')"></span>{{ t('diag.retry') }}
+            </button>
+          </div>
+        </div>
+
+        <template v-else-if="diag">
+          <!-- verdict -->
+          <div class="diag-hero" :class="diagGrade">
+            <div class="diag-hero-main">
+              <div class="diag-grade"><i class="dot" :class="diagGradeDot"></i>{{ t('diag.grade.' + diagGrade) }}</div>
+              <h2 class="diag-title">{{ diag.summary.title }}</h2>
+              <p class="diag-detail">{{ diag.summary.detail }}</p>
+              <div class="diag-meta mono faint">
+                <span v-if="diag.checked_at">{{ t('diag.checkedAt', { v: fmt.fmtDate(diag.checked_at) }) }}</span>
+                <span v-if="diag.version">· v{{ diag.version }}</span>
+                <span v-if="diagOffline">· {{ t('diag.engineOffline') }}</span>
+              </div>
+            </div>
+            <div class="diag-hero-actions">
+              <button class="btn" :disabled="diagLoading" @click="loadDiagnostics(true)">
+                <span class="ic" v-html="ic(diagLoading ? 'refresh' : 'pulse')"></span>
+                {{ diagLoading ? t('diag.running') : t('diag.rerun') }}
+              </button>
+              <button class="btn primary" @click="copyDiagReport">
+                <span class="ic" v-html="ic('download')"></span>{{ t('diag.copyReport') }}
+              </button>
+            </div>
+          </div>
+
+          <!-- key metrics -->
+          <div class="grid c4 diag-metrics" style="margin-top:var(--gap)">
+            <div class="stat">
+              <div class="k"><span class="ic" v-html="ic('servers')"></span>{{ t('diag.metric.ed2k') }}</div>
+              <div class="v">{{ diagEd2kLabel }}</div>
+              <div class="s">{{ diagServerLabel }}</div>
+            </div>
+            <div class="stat">
+              <div class="k"><span class="ic" v-html="ic('globe')"></span>{{ t('diag.metric.kad') }}</div>
+              <div class="v">{{ diagKadLabel }}</div>
+              <div class="s">{{ t('diag.metric.nodes', { n: fmt.fmtNum(diagEngine.kadNodes) }) }}</div>
+            </div>
+            <div class="stat">
+              <div class="k"><span class="ic" v-html="ic('plug')"></span>{{ t('diag.metric.tcp') }}</div>
+              <div class="v mono">{{ diagEngine.tcpPort || '—' }}</div>
+              <div class="s">
+                {{ diagPorts.tcp_listening ? t('diag.metric.listening') : t('diag.metric.closed') }}
+                <span v-if="diagEngine.udpPort">· {{ t('diag.metric.udpPort', { n: diagEngine.udpPort }) }}</span>
+              </div>
+            </div>
+            <div class="stat">
+              <div class="k"><span class="ic" v-html="ic('down')"></span>{{ t('diag.metric.inbound') }}</div>
+              <div class="v mono">{{ fmt.fmtNum(diagEngine.inbound) }}</div>
+              <div class="s">{{ t('diag.metric.inboundHint') }}</div>
+            </div>
+          </div>
+
+          <div class="grid c2 diag-lists" style="margin-top:var(--gap)">
+            <div class="card">
+              <h3>{{ t('diag.checks') }}</h3>
+              <div class="faint" v-if="!(diag.checks || []).length">{{ t('diag.checksEmpty') }}</div>
+              <div class="checklist" v-else>
+                <div class="checkrow" v-for="c in diag.checks" :key="c.id">
+                  <span class="checkic" :class="c.level" v-html="ic(checkIcon(c.level))"></span>
+                  <div class="checkbody">
+                    <div class="checktitle">{{ c.title }}</div>
+                    <div class="checkdetail" v-if="c.detail">{{ c.detail }}</div>
+                    <div class="checkaction" v-if="c.action">{{ c.action }}</div>
+                  </div>
+                  <span class="chip checklevel" :class="{ ok: c.level === 'ok', warn: c.level === 'warn', err: c.level === 'error' }">
+                    {{ t('diag.level.' + (c.level === 'error' ? 'error' : c.level)) }}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>{{ t('diag.suggestions') }}</h3>
+              <div class="faint" v-if="!(diag.suggestions || []).length">{{ t('diag.suggestionsEmpty') }}</div>
+              <ol class="sugglist" v-else>
+                <li v-for="(sug, i) in diag.suggestions" :key="'sg' + i">
+                  <span class="sugtext">{{ sug }}</span>
+                  <button type="button" class="btn sm ghost sugcopy" @click="copyText(sug)">{{ t('diag.copy') }}</button>
+                </li>
+              </ol>
+            </div>
+          </div>
+
+          <!-- host network -->
+          <div class="card" style="margin-top:var(--gap)">
+            <h3>{{ t('diag.host') }}</h3>
+            <dl class="kv">
+              <dt>{{ t('diag.lanIp') }}</dt><dd class="mono">{{ diagHost.lan_ip || '—' }}</dd>
+              <dt>{{ t('diag.gateway') }}</dt><dd class="mono">{{ diagHost.gateway || '—' }}</dd>
+              <dt>{{ t('diag.publicIp') }}</dt>
+              <dd class="mono">{{ diagHost.public_ip || '—' }}
+                <span class="faint" v-if="diagHost.public_ip_error"> · {{ diagHost.public_ip_error }}</span>
+              </dd>
+              <dt>{{ t('diag.cgnat') }}</dt>
+              <dd>{{ diagHost.cgnat_suspect ? t('diag.level.warn') : t('diag.level.ok') }}</dd>
+              <dt>{{ t('diag.firewall') }}</dt>
+              <dd>{{ firewallLabel() }}
+                <span class="faint" v-if="diagPorts.firewall_detail"> · {{ diagPorts.firewall_detail }}</span>
+              </dd>
+            </dl>
+          </div>
+
+          <!-- how to reach a High ID -->
+          <div class="card" style="margin-top:var(--gap)">
+            <button type="button" class="collapse-head" @click="diagHow = !diagHow"
+                    :aria-expanded="diagHow ? 'true' : 'false'">
+              <span>{{ t('diag.howTitle') }}</span>
+              <span class="ic" v-html="ic(diagHow ? 'sortAsc' : 'sortDesc')"></span>
+            </button>
+            <div class="howlist" v-if="diagHow">
+              <p>{{ t('diag.how1', { tcp: diagEngine.tcpPort, udp: diagEngine.udpPort }) }}</p>
+              <p>{{ t('diag.how2', { tcp: diagEngine.tcpPort }) }}</p>
+              <p>{{ t('diag.how3') }}</p>
+              <p>{{ t('diag.how4') }}</p>
+            </div>
+          </div>
+        </template>
+      </template>
+
+      <!-- ================= SETTINGS ================= -->
+      <template v-if="view === 'settings'">
+        <div class="workbar">
+          <button v-for="st in settingsTabs" :key="st.id" type="button"
+                  :class="{ on: settingsTab === st.id }" @click="settingsTab = st.id">
+            <span>{{ st.label }}</span>
+            <i class="workbar-dot" v-if="st.id === 'update' && updateNew"></i>
+          </button>
+        </div>
+
+        <!-- ---------- panel ---------- -->
+        <div class="card" v-if="settingsTab === 'panel'">
+          <h3>{{ t('settings.tab.panel') }}</h3>
+          <div class="form-grid">
+            <div class="field">
+              <label>{{ t('settings.panel.port') }}</label>
+              <input class="input" type="number" min="1" max="65535" v-model.number="draft.panel.port">
+              <div class="hint">{{ t('settings.panel.portHint') }}</div>
+            </div>
+            <div class="field">
+              <label>{{ t('settings.panel.theme') }}</label>
+              <select v-if="!isMobile" class="select" :value="draft.panel.theme" @change="setThemeMode($event.target.value)">
+                <option value="auto">{{ t('settings.panel.theme.auto') }}</option>
+                <option value="dark">{{ t('settings.panel.theme.dark') }}</option>
+                <option value="light">{{ t('settings.panel.theme.light') }}</option>
+              </select>
+              <button v-else type="button" class="select picker-trigger" @click="openPicker({
+                title: t('settings.panel.theme'),
+                value: draft.panel.theme,
+                options: [
+                  { value: 'auto', label: t('settings.panel.theme.auto') },
+                  { value: 'dark', label: t('settings.panel.theme.dark') },
+                  { value: 'light', label: t('settings.panel.theme.light') }
+                ],
+                onPick: setThemeMode
+              })"><span class="v">{{ t('settings.panel.theme.' + (draft.panel.theme || 'auto')) }}</span></button>
+            </div>
+            <div class="field">
+              <label>{{ t('settings.panel.lang') }}</label>
+              <select v-if="!isMobile" class="select" :value="draft.panel.lang" @change="setLang($event.target.value)">
+                <option value="zh">{{ t('settings.panel.lang.zh') }}</option>
+                <option value="en">{{ t('settings.panel.lang.en') }}</option>
+              </select>
+              <button v-else type="button" class="select picker-trigger" @click="openPicker({
+                title: t('settings.panel.lang'),
+                value: draft.panel.lang,
+                options: [
+                  { value: 'zh', label: t('settings.panel.lang.zh') },
+                  { value: 'en', label: t('settings.panel.lang.en') }
+                ],
+                onPick: setLang
+              })"><span class="v">{{ t('settings.panel.lang.' + (draft.panel.lang || 'zh')) }}</span></button>
+            </div>
+            <div class="field">
+              <label>{{ t('settings.panel.version') }}</label>
+              <div class="mono" style="height:36px;display:flex;align-items:center">v{{ appVersion }}</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---------- network ---------- -->
+        <div class="card" v-if="settingsTab === 'network'">
+          <h3>{{ t('settings.tab.network') }}</h3>
+          <div class="form-grid">
+            <div class="field">
+              <label>{{ t('settings.net.tcp') }}</label>
+              <input class="input" type="number" min="1" max="65535" v-model.number="draft.engine.tcp_port">
+            </div>
+            <div class="field">
+              <label>{{ t('settings.net.udp') }}</label>
+              <input class="input" type="number" min="1" max="65535" v-model.number="draft.engine.udp_port">
+            </div>
+            <div class="field">
+              <label>{{ t('settings.net.ec') }}</label>
+              <input class="input" type="number" min="1" max="65535" v-model.number="draft.engine.ec_port">
+              <div class="hint">{{ t('settings.net.ecHint') }}</div>
+            </div>
+            <div class="field">
+              <label>{{ t('settings.net.nick') }}</label>
+              <input class="input" v-model="draft.engine.nick" maxlength="64">
+            </div>
+          </div>
+          <div class="hint warn" style="margin:-4px 0 12px">{{ t('settings.net.portsHint') }}</div>
+          <div class="swrow">
+            <div class="swtext"><div class="swname">{{ t('settings.net.connectEd2k') }}</div></div>
+            <label class="switch"><input type="checkbox" v-model="draft.engine.connect_ed2k"></label>
+          </div>
+          <div class="swrow">
+            <div class="swtext"><div class="swname">{{ t('settings.net.connectKad') }}</div></div>
+            <label class="switch"><input type="checkbox" v-model="draft.engine.connect_kad"></label>
+          </div>
+          <div class="swrow">
+            <div class="swtext"><div class="swname">{{ t('settings.net.autoconnect') }}</div></div>
+            <label class="switch"><input type="checkbox" v-model="draft.engine.autoconnect"></label>
+          </div>
+          <div class="swrow">
+            <div class="swtext"><div class="swname">{{ t('settings.net.addPaused') }}</div></div>
+            <label class="switch"><input type="checkbox" v-model="draft.engine.add_paused"></label>
+          </div>
+          <div class="swrow">
+            <div class="swtext"><div class="swname">{{ t('settings.net.ich') }}</div></div>
+            <label class="switch"><input type="checkbox" v-model="draft.engine.ich"></label>
+          </div>
+          <div class="swrow">
+            <div class="swtext"><div class="swname">{{ t('settings.net.aich') }}</div></div>
+            <label class="switch"><input type="checkbox" v-model="draft.engine.aich"></label>
+          </div>
+          <div class="swrow">
+            <div class="swtext"><div class="swname">{{ t('settings.net.upnp') }}</div></div>
+            <label class="switch"><input type="checkbox" v-model="draft.engine.upnp"></label>
+          </div>
+          <div class="swrow last">
+            <div class="swtext"><div class="swname">{{ t('settings.net.ipfilter') }}</div></div>
+            <label class="switch"><input type="checkbox" v-model="draft.engine.ipfilter"></label>
+          </div>
+        </div>
+
+        <!-- ---------- bandwidth ---------- -->
+        <div class="card" v-if="settingsTab === 'bandwidth'">
+          <h3>{{ t('settings.tab.bandwidth') }}</h3>
+          <div class="form-grid">
+            <div class="field">
+              <label>{{ t('settings.bw.maxDown') }} (kB/s)</label>
+              <input class="input" type="number" min="0" v-model.number="draft.engine.max_download">
+              <div class="hint">{{ t('settings.bw.unlimited') }}</div>
+            </div>
+            <div class="field">
+              <label>{{ t('settings.bw.maxUp') }} (kB/s)</label>
+              <input class="input" type="number" min="0" v-model.number="draft.engine.max_upload">
+              <div class="hint">{{ t('settings.bw.unlimited') }}</div>
+            </div>
+            <div class="field">
+              <label>{{ t('settings.bw.maxConn') }}</label>
+              <input class="input" type="number" min="1" max="2000" v-model.number="draft.engine.max_connections">
+            </div>
+            <div class="field">
+              <label>{{ t('settings.bw.maxSources') }}</label>
+              <input class="input" type="number" min="1" max="5000" v-model.number="draft.engine.max_sources">
+            </div>
+          </div>
+          <div class="hint">{{ t('settings.bw.hint') }}</div>
+        </div>
+
+        <!-- ---------- folders ---------- -->
+        <div class="card" v-if="settingsTab === 'dirs'">
+          <h3>{{ t('settings.tab.dirs') }}</h3>
+          <div class="field">
+            <label>{{ t('settings.dirs.incoming') }}</label>
+            <input class="input mono" v-model="draft.engine.incoming_dir">
+          </div>
+          <div class="field">
+            <label>{{ t('settings.dirs.temp') }}</label>
+            <input class="input mono" v-model="draft.engine.temp_dir">
+          </div>
+          <div class="field">
+            <label>{{ t('settings.dirs.shared') }}</label>
+            <div class="faint" v-if="!draft.engine.shared_dirs.length" style="padding:2px 0 8px">
+              {{ t('settings.dirs.sharedEmpty') }}
+            </div>
+            <div class="dirrow" v-for="(d, i) in draft.engine.shared_dirs" :key="'sd' + i">
+              <span class="mono" :title="d">{{ d }}</span>
+              <button class="btn sm danger" @click="removeSharedDir(i)">{{ t('settings.dirs.remove') }}</button>
+            </div>
+            <div class="row" style="margin-top:8px">
+              <input class="input mono" v-model="newSharedDir" :placeholder="t('settings.dirs.sharedPh')">
+              <button class="btn" @click="addSharedDir">{{ t('settings.dirs.addShared') }}</button>
+            </div>
+          </div>
+          <div class="hint">{{ t('settings.dirs.hint') }}</div>
+        </div>
+
+        <!-- ---------- bootstrap ---------- -->
+        <div class="card" v-if="settingsTab === 'bootstrap'">
+          <h3>{{ t('settings.tab.bootstrap') }}</h3>
+          <div class="field">
+            <label>{{ t('settings.boot.serverMet') }}</label>
+            <input class="input mono" v-model="draft.bootstrap.server_met_url">
+          </div>
+          <div class="field">
+            <label>{{ t('settings.boot.nodesDat') }}</label>
+            <input class="input mono" v-model="draft.bootstrap.nodes_dat_url">
+          </div>
+          <div class="form-grid">
+            <div class="field">
+              <label>{{ t('settings.boot.autoHours') }}</label>
+              <input class="input" type="number" min="0" v-model.number="draft.bootstrap.auto_hours">
+            </div>
+            <div class="field">
+              <label>{{ t('settings.boot.lastUpdate') }}</label>
+              <div class="mono" style="height:36px;display:flex;align-items:center">
+                {{ draft.bootstrap.last_update ? fmt.fmtDate(draft.bootstrap.last_update) : t('settings.boot.never') }}
+              </div>
+            </div>
+          </div>
+          <div class="row wrap" style="gap:8px">
+            <button class="btn primary" :disabled="bootstrapping" @click="updateBootstrap">
+              <span class="ic" v-html="ic(bootstrapping ? 'refresh' : 'download')"></span>
+              {{ bootstrapping ? t('settings.boot.updating') : t('settings.boot.updateNow') }}
+            </button>
+          </div>
+          <div class="hint" style="margin-top:10px">{{ t('settings.boot.hint') }}</div>
+        </div>
+
+        <!-- ---------- notifications ---------- -->
+        <div class="card" v-if="settingsTab === 'notify'">
+          <div class="card-head"><h3>{{ t('settings.tab.notify') }}</h3></div>
+          <div class="swrow">
+            <div class="swtext">
+              <div class="swname">{{ t('settings.notify.enabled') }}</div>
+              <div class="hint">{{ t('settings.notify.enabledHint') }}</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" :checked="draft.notify.enabled" @change="saveNotifyFlag('enabled', $event.target.checked)">
+            </label>
+          </div>
+          <div class="swrow">
+            <div class="swtext">
+              <div class="swname">{{ t('settings.notify.onComplete') }}</div>
+              <div class="hint">{{ t('settings.notify.onCompleteHint') }}</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" :checked="draft.notify.events.complete" @change="saveNotifyEvent('complete', $event.target.checked)">
+            </label>
+          </div>
+          <div class="swrow last">
+            <div class="swtext">
+              <div class="swname">{{ t('settings.notify.onError') }}</div>
+              <div class="hint">{{ t('settings.notify.onErrorHint') }}</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" :checked="draft.notify.events.error" @change="saveNotifyEvent('error', $event.target.checked)">
+            </label>
+          </div>
+        </div>
+
+        <div class="card" v-if="settingsTab === 'notify'">
+          <div class="card-head">
+            <h3>{{ t('settings.notify.channels') }}</h3>
+            <div class="spacer"></div>
+            <button class="btn sm primary" type="button" @click="openChannelForm(null)">
+              <span class="ic" v-html="ic('plus')"></span>{{ t('settings.notify.addChannel') }}
+            </button>
+          </div>
+          <div class="empty" v-if="!notifyChannels.length">
+            <span class="ic big" style="width:32px;height:32px" v-html="ic('bell')"></span>
+            {{ t('settings.notify.empty') }}
+          </div>
+          <div class="chlist" v-else>
+            <div class="chrow" v-for="ch in notifyChannels" :key="ch.id">
+              <span class="chico" v-html="ic('bell')"></span>
+              <div class="chin" style="min-width:0">
+                <div class="chname ellipsis">{{ ch.name }}</div>
+                <div class="chmeta">{{ notifyTypeLabel(ch.type) }} · {{ ch.enabled ? t('settings.notify.stateOn') : t('settings.notify.stateOff') }}</div>
+              </div>
+              <div class="spacer"></div>
+              <button class="btn sm" type="button" :disabled="testingChannel === ch.id" @click="testChannel(ch)">
+                {{ testingChannel === ch.id ? t('settings.notify.testing') : t('settings.notify.test') }}
+              </button>
+              <button class="btn sm" type="button" @click="openChannelForm(ch)">{{ t('settings.notify.editChannel') }}</button>
+              <button class="btn sm danger" type="button" @click="askRemoveChannel(ch)">{{ t('settings.notify.remove') }}</button>
+            </div>
+          </div>
+          <div class="hint" style="margin-top:12px">{{ t('settings.notify.channelHint') }}</div>
+        </div>
+
+        <!-- ---------- backup ---------- -->
+        <div class="card" v-if="settingsTab === 'backup'">
+          <div class="card-head">
+            <h3>{{ t('settings.tab.backup') }}</h3>
+            <div class="spacer"></div>
+            <button class="btn primary" :disabled="backupRunning" @click="runBackup">
+              <span class="ic" v-html="ic(backupRunning ? 'refresh' : 'download')"></span>
+              {{ backupRunning ? t('settings.backup.running') : t('settings.backup.run') }}
+            </button>
+          </div>
+          <div class="faint" v-if="!(backupData.items || []).length">{{ t('settings.backup.empty') }}</div>
+          <div class="bscroll" v-else>
+            <table class="ttable tbackup">
+              <thead>
+                <tr>
+                  <th>{{ t('settings.backup.list') }}</th>
+                  <th class="num" style="width:96px">{{ t('settings.backup.size') }}</th>
+                  <th class="acts" style="width:150px"></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="b in backupData.items" :key="b.name">
+                  <td class="bcname">
+                    <div class="mono ellipsis" :title="b.name">{{ b.name }}</div>
+                    <div class="sub">{{ b.t ? fmt.fmtDate(b.t) : '—' }}</div>
+                  </td>
+                  <td class="num mono">{{ fmt.fmtBytes(b.size) }}</td>
+                  <td class="acts">
+                    <button class="btn sm" @click="askRestoreBackup(b)">{{ t('settings.backup.restore') }}</button>
+                    <button class="btn sm danger" @click="askDeleteBackup(b)">{{ t('settings.backup.delete') }}</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="hint" style="margin-top:10px">{{ t('settings.backup.hint') }}</div>
+        </div>
+
+        <!-- ---------- update ---------- -->
+        <div class="card" v-if="settingsTab === 'update'">
+          <div class="card-head">
+            <h3>{{ t('settings.tab.update') }}</h3>
+            <div class="spacer"></div>
+            <a class="btn sm" v-if="updateInfo && updateInfo.url" :href="updateInfo.url"
+               target="_blank" rel="noopener noreferrer">{{ t('settings.update.release') }}</a>
+          </div>
+          <div class="vhero">
+            <div class="vcol">
+              <div class="vk">{{ t('settings.update.current') }}</div>
+              <div class="vv">v{{ appVersion }}</div>
+            </div>
+            <span class="varrow" v-html="ic('arrowRight')"></span>
+            <div class="vcol">
+              <div class="vk">{{ t('settings.update.latest') }}</div>
+              <div class="vv" :class="{ fresh: updateNew }">{{ updateInfo && updateInfo.latest ? 'v' + updateInfo.latest : '—' }}</div>
+            </div>
+          </div>
+          <div class="vstatus" :class="updateNew ? 'has' : 'idle'">
+            <span class="vsic" v-html="ic('spark')"></span>
+            <div class="vstext">
+              <b>{{ updateNew ? t('settings.update.available', { v: updateInfo.latest })
+                    : (updateInfo && updateInfo.state === 'no_release' ? t('settings.update.noRelease')
+                       : (updateInfo ? t('settings.update.upToDate') : t('settings.update.notChecked'))) }}</b>
+              <span>{{ updateInfo && updateInfo.notes ? updateInfo.notes.split('\n')[0] : t('settings.update.hint') }}</span>
+            </div>
+            <div class="spacer"></div>
+            <button class="btn sm" :disabled="updateChecking || updateInstalling" @click="checkUpdate(true)">
+              <span class="ic" v-html="ic('refresh')"></span>
+              {{ updateChecking ? t('settings.update.checking') : t('settings.update.check') }}
+            </button>
+            <button class="btn sm primary" v-if="updateNew" :disabled="updateInstalling" @click="askInstallUpdate">
+              {{ updateInstalling ? t('settings.update.installing') : t('settings.update.install') }}
+            </button>
+          </div>
+          <div class="hint err" style="margin-top:10px" v-if="updateError">{{ updateError }}</div>
+          <div class="sep"></div>
+          <h3>{{ t('settings.update.notes') }}</h3>
+          <div class="relnotes" v-if="updateInfo && updateInfo.notes">{{ updateInfo.notes }}</div>
+          <div class="faint" v-else>{{ t('settings.update.noNotes') }}</div>
+        </div>
+
+        <!-- ---------- about ---------- -->
+        <div class="card" v-if="settingsTab === 'about'">
+          <h3>{{ t('settings.tab.about') }}</h3>
+          <p class="dim" style="margin:0 0 14px">{{ t('settings.about.desc') }}</p>
+          <dl class="kv">
+            <dt>{{ t('settings.about.version') }}</dt><dd class="mono">v{{ appVersion }}</dd>
+            <dt>{{ t('settings.about.engine') }}</dt><dd class="mono">aMule {{ engineVersion || '—' }}</dd>
+            <dt>{{ t('settings.about.license') }}</dt><dd>GPL-2.0</dd>
+            <dt>{{ t('settings.about.ports') }}</dt>
+            <dd class="mono">
+              <span v-if="draft.panel">{{ t('settings.tab.panel') }} {{ draft.panel.port }}</span>
+              <span v-if="draft.engine"> · eD2k {{ draft.engine.tcp_port }}/{{ draft.engine.udp_port }}</span>
+              <span v-if="draft.engine"> · EC {{ draft.engine.ec_port }}</span>
+            </dd>
+            <dt>{{ t('settings.about.support') }}</dt><dd>eD2k · Kad</dd>
+            <dt>{{ t('settings.about.repo') }}</dt>
+            <dd>
+              <a :href="'https://github.com/' + (draft.update ? draft.update.repo : 'Smi13zZ/fn-emule')"
+                 target="_blank" rel="noopener noreferrer" class="mono">{{ draft.update ? draft.update.repo : 'Smi13zZ/fn-emule' }}</a>
+            </dd>
+          </dl>
+        </div>
+
+        <!-- save bar: only for the sections that own a form -->
+        <div class="savebar" :class="{ dirty: dirty }"
+             v-if="['panel','network','bandwidth','dirs','bootstrap'].indexOf(settingsTab) >= 0">
+          <span class="dot" :class="dirty ? 'warn' : 'on'"></span>
+          <span class="dirtytxt" :class="{ on: dirty }">{{ dirty ? t('settings.dirty') : t('settings.clean') }}</span>
+          <span class="faint nowrap" style="font-size:12px" v-if="dirty && restartNeeded">{{ t('settings.restartWarn') }}</span>
+          <div class="spacer"></div>
+          <button class="btn" :disabled="!dirty || settingsSaving" @click="resetSettings">{{ t('settings.reset') }}</button>
+          <button class="btn primary" :disabled="!dirty || settingsSaving" @click="saveSettingsDraft">
+            <span class="ic" v-html="ic(settingsSaving ? 'refresh' : 'check')"></span>
+            {{ settingsSaving ? t('settings.saving') : t('settings.save') }}
+          </button>
+        </div>
+      </template>
+
+    </div>
+  </div>
+</div>
+
+<!-- ================= transfer detail drawer ================= -->
+<div class="mask" v-if="detail" @click.self="closeDetail">
+  <div class="drawer">
+    <div class="drawer-head">
+      <div style="flex:1;min-width:0">
+        <div class="t">{{ detail.name }}</div>
+        <div class="row wrap" style="margin-top:8px;gap:6px">
+          <span class="chip" :style="{ color: fmt.toneColor(stLabel(detail.status).tone) }">{{ stLabel(detail.status).label }}</span>
+          <span class="chip mono" v-if="detail.hash">{{ detail.hash.slice(0, 12) }}</span>
+          <span class="chip" v-if="detail.category">{{ detail.category }}</span>
+          <span class="chip">{{ t('priority.' + fmt.fmtPriority(detail.priority)) }}</span>
+        </div>
+      </div>
+      <button class="icon-btn ghost" @click="closeDetail" :aria-label="t('add.cancel')">
+        <span v-html="ic('close')"></span>
+      </button>
+    </div>
+
+    <div class="drawer-body">
+      <div class="progress" :class="progressClass(detail)" style="height:8px;margin-bottom:8px">
+        <i :style="{ width: Math.max(0, Math.min(100, detail.percent * 100)) + '%' }"></i>
+      </div>
+      <div class="row" style="margin-bottom:16px">
+        <span class="mono">{{ fmt.fmtPercent(detail.percent) }}</span>
+        <span class="faint">·</span>
+        <span class="mono faint">{{ fmt.fmtBytes(detail.done) }} / {{ fmt.fmtBytes(detail.size) }}</span>
+        <div class="spacer"></div>
+        <span class="arrow-dl mono" v-if="detail.speed">↓ {{ fmt.fmtSpeed(detail.speed) }}</span>
+        <span class="faint mono" v-else>{{ fmt.fmtSpeed(0) }}</span>
+      </div>
+
+      <div class="tabs">
+        <button v-for="tb in detailTabs" :key="tb" :class="{ on: detailTab === tb }"
+                @click="selectDetailTab(tb)">{{ t('detail.tab.' + tb) }}</button>
+      </div>
+
+      <div v-if="detailLoading" class="empty">{{ t('detail.loading') }}</div>
+
+      <template v-else>
+        <div v-if="detailTab === 'info'">
+          <dl class="kv">
+            <dt>{{ t('detail.size') }}</dt><dd class="mono">{{ fmt.fmtBytes(detail.size) }}</dd>
+            <dt>{{ t('detail.done') }}</dt><dd class="mono">{{ fmt.fmtBytes(detail.done) }}</dd>
+            <dt>{{ t('detail.percent') }}</dt><dd class="mono">{{ fmt.fmtPercent(detail.percent) }}</dd>
+            <dt>{{ t('detail.speed') }}</dt><dd class="mono">{{ fmt.fmtSpeed(detail.speed) }}</dd>
+            <dt>{{ t('detail.eta') }}</dt><dd class="mono">{{ fmt.fmtEta(detail.eta) }}</dd>
+            <dt>{{ t('detail.priority') }}</dt><dd>{{ t('priority.' + fmt.fmtPriority(detail.priority)) }}</dd>
+            <dt>{{ t('detail.category') }}</dt><dd>{{ detail.category || '—' }}</dd>
+            <dt>{{ t('detail.sourcesTotal') }}</dt><dd class="mono">{{ fmt.fmtNum(detail.sources && detail.sources.total) }}</dd>
+            <dt>{{ t('detail.sourcesConn') }}</dt><dd class="mono">{{ fmt.fmtNum(detail.sources && detail.sources.transferring) }}</dd>
+            <dt>{{ t('detail.sourcesAsked') }}</dt><dd class="mono">{{ fmt.fmtNum(detail.sources && detail.sources.asked) }}</dd>
+            <dt>{{ t('detail.sourcesFound') }}</dt><dd class="mono">{{ fmt.fmtNum(detail.sources && detail.sources.found) }}</dd>
+            <dt>{{ t('detail.a4af') }}</dt><dd class="mono">{{ fmt.fmtNum(detail.sources && detail.sources.a4af) }}</dd>
+            <dt>{{ t('detail.client') }}</dt>
+            <dd>{{ clientLabel(detail) || '—' }}</dd>
+            <dt>{{ t('detail.partfile') }}</dt><dd>{{ detail.partfile ? '✓' : '—' }}</dd>
+            <dt>{{ t('detail.shared') }}</dt><dd>{{ detail.shared ? '✓' : '—' }}</dd>
+            <dt>{{ t('detail.hash') }}</dt><dd class="mono" style="word-break:break-all">{{ detail.hash }}</dd>
+            <dt>{{ t('detail.added') }}</dt><dd>{{ detail.added ? fmt.fmtDate(detail.added) : '—' }}</dd>
+          </dl>
+          <div class="sep"></div>
+          <div class="row wrap" style="gap:8px">
+            <button class="btn sm" @click="togglePause(detail)">
+              {{ fmt.isPaused(detail) ? t('detail.resume') : t('detail.pause') }}
+            </button>
+            <button class="btn sm" v-for="p in priorities" :key="p" @click="setPriority(detail, p)">
+              {{ t('priority.' + p) }}
+            </button>
+            <div class="spacer"></div>
+            <button class="btn sm danger" @click="askCancel([detail])">{{ t('detail.cancel') }}</button>
+          </div>
+        </div>
+
+        <div v-if="detailTab === 'sources'">
+          <table class="ttable" v-if="detailData.sources && detailData.sources.length">
+            <thead>
+              <tr>
+                <th>{{ t('detail.sourceIp') }}</th>
+                <th class="hide-sm">{{ t('detail.sourceClient') }}</th>
+                <th class="hide-sm" style="width:82px">{{ t('detail.sourceVersion') }}</th>
+                <th class="num" style="width:104px">{{ t('detail.sourceSpeed') }}</th>
+                <th class="num" style="width:96px">{{ t('detail.sourceQueue') }}</th>
+                <th style="width:96px">{{ t('detail.sourceState') }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(s, i) in detailData.sources" :key="'src' + i">
+                <td class="mono">{{ s.ip }}<span class="faint">:{{ s.port }}</span></td>
+                <td class="hide-sm ellipsis" style="max-width:180px" :title="s.client">{{ s.client || '—' }}</td>
+                <td class="mono hide-sm">{{ s.version || '—' }}</td>
+                <td class="num mono">
+                  <span class="arrow-dl" v-if="s.speed">{{ fmt.fmtSpeed(s.speed) }}</span>
+                  <span class="faint" v-else>—</span>
+                </td>
+                <td class="num mono">
+                  <span v-if="s.queue_rank !== undefined && s.queue_rank !== null">{{ fmt.fmtNum(s.queue_rank) }}</span>
+                  <span class="faint" v-else>—</span>
+                </td>
+                <td><span class="chip">{{ sourceStateLabel(s.state) }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <div class="empty" v-else>{{ t('detail.sourcesEmpty') }}</div>
+        </div>
+
+        <div v-if="detailTab === 'chunks'">
+          <div class="chunkmap" v-if="chunkCells.length">
+            <i class="cc" v-for="(c, i) in chunkCells" :key="'cc' + i" :class="c"></i>
+          </div>
+          <div class="empty" v-else>{{ t('detail.chunksEmpty') }}</div>
+          <div class="chunklegend" v-if="chunkCells.length">
+            <span>{{ t('detail.chunkCount', { n: chunkTotal }) }}</span>
+            <span><i style="background:var(--dl)"></i>{{ t('detail.chunkDone') }}</span>
+            <span><i style="background:color-mix(in srgb, var(--warn) 70%, transparent)"></i>{{ t('detail.chunkPending') }}</span>
+            <span><i style="background:var(--muted)"></i>{{ t('detail.chunkMissing') }}</span>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+</div>
+
+<!-- ================= add links modal ================= -->
+<div class="modal-wrap" v-if="addOpen">
+  <div class="modal">
+    <div class="modal-head">{{ t('add.title') }}</div>
+    <div class="modal-body">
+      <div class="field">
+        <label>{{ t('add.links') }}</label>
+        <textarea class="textarea" rows="6" v-model="addForm.links" :placeholder="t('add.linksPh')"></textarea>
+        <div class="hint">{{ t('add.hint') }}</div>
+      </div>
+      <div class="form-grid">
+        <div class="field">
+          <label>{{ t('add.category') }}</label>
+          <input class="input" v-model="addForm.category" :placeholder="t('add.categoryPh')">
+        </div>
+        <div class="field">
+          <label class="switch" style="margin-top:24px">
+            <input type="checkbox" v-model="addForm.paused">
+            <span>{{ t('add.paused') }}</span>
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <div class="spacer"></div>
+      <button class="btn" @click="addOpen = false">{{ t('add.cancel') }}</button>
+      <button class="btn primary" :disabled="adding" @click="submitAdd">{{ t('add.confirm') }}</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= add server modal ================= -->
+<div class="modal-wrap" v-if="serverForm">
+  <div class="modal">
+    <div class="modal-head">{{ t('servers.addTitle') }}</div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field">
+          <label>{{ t('servers.address') }}</label>
+          <div class="row" style="gap:8px">
+            <input class="input mono" v-model="serverForm.ip" placeholder="85.17.116.222" style="flex:2">
+            <input class="input mono" type="number" min="1" max="65535" v-model.number="serverForm.port" placeholder="6082" style="flex:1">
+          </div>
+        </div>
+        <div class="field">
+          <label>{{ t('servers.name') }}</label>
+          <input class="input" v-model="serverForm.name" :placeholder="t('servers.namePh')">
+        </div>
+      </div>
+      <div class="hint">{{ t('servers.addHint') }}</div>
+    </div>
+    <div class="modal-foot">
+      <div class="spacer"></div>
+      <button class="btn" @click="serverForm = null">{{ t('add.cancel') }}</button>
+      <button class="btn primary" :disabled="savingServer" @click="saveServer">{{ t('settings.save') }}</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= notification channel form ================= -->
+<div class="modal-wrap" v-if="channelForm">
+  <div class="modal">
+    <div class="modal-head">{{ channelForm.id ? t('settings.notify.editChannel') : t('settings.notify.addChannel') }}</div>
+    <div class="modal-body">
+      <div class="field">
+        <label>{{ t('settings.notify.name') }}</label>
+        <input class="input" v-model="channelForm.name" :placeholder="notifyTypeLabel(channelForm.type)">
+      </div>
+      <div class="field">
+        <label>{{ t('settings.notify.type') }}</label>
+        <select class="select" v-model="channelForm.type">
+          <option v-for="ty in notifyTypes" :key="ty" :value="ty">{{ notifyTypeLabel(ty) }}</option>
+        </select>
+      </div>
+
+      <!-- fields come from /api/notify types[].fields/secrets, so a new
+           backend channel type needs no template change here -->
+      <div class="field" v-for="f in channelFields" :key="f.name">
+        <label>{{ t('settings.notify.f.' + f.name) }}</label>
+        <textarea v-if="f.name === 'headers'" class="textarea" rows="3" v-model="channelForm.config[f.name]"></textarea>
+        <input v-else class="input" :type="f.secret ? 'password' : 'text'"
+               :autocomplete="f.secret ? 'new-password' : 'off'" v-model="channelForm.config[f.name]">
+        <div class="hint" v-if="f.name === 'headers'">{{ t('settings.notify.f.headersHint') }}</div>
+      </div>
+
+      <label class="switch" style="margin-top:4px">
+        <input type="checkbox" v-model="channelForm.enabled">
+        <span>{{ t('settings.notify.channelEnabled') }}</span>
+      </label>
+    </div>
+    <div class="modal-foot">
+      <div class="spacer"></div>
+      <button class="btn" @click="channelForm = null">{{ t('add.cancel') }}</button>
+      <button class="btn primary" :disabled="savingChannel" @click="saveChannel">{{ t('settings.save') }}</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= confirm ================= -->
+<div class="modal-wrap" v-if="confirmBox">
+  <div class="modal" style="width:min(440px,100%)">
+    <div class="modal-head">{{ confirmBox.title }}</div>
+    <div class="modal-body">
+      <div>{{ confirmBox.text }}</div>
+    </div>
+    <div class="modal-foot">
+      <div class="spacer"></div>
+      <button class="btn" @click="confirmBox = null">{{ t('confirm.cancel') }}</button>
+      <button class="btn danger" @click="confirmBox.onOk(confirmBox)">{{ confirmBox.okText }}</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= one-click update overlay ================= -->
+<div class="upoverlay" v-if="updateInstalling">
+  <div class="upoverlay-box">
+    <span class="upspin" v-html="ic('refresh')"></span>
+    <div class="uptitle">{{ t('settings.update.installing') }}</div>
+    <div class="dim">{{ updateInstallDetail || t('settings.update.hint') }}</div>
+  </div>
+</div>
+
+<div class="toasts">
+  <div v-for="tt in toasts" :key="tt.id" class="toast" :class="tt.kind">{{ tt.text }}</div>
+</div>
+
+<!-- mobile-only action-sheet picker that replaces the OS-native select popover -->
+<div class="picker-mask" v-if="pickerState" @click.self="closePicker()">
+  <div class="picker-sheet" @click.stop>
+    <div class="picker-title">{{ pickerState.title }}</div>
+    <div class="picker-list">
+      <button v-for="o in pickerState.options" :key="o.value" type="button" class="picker-item"
+              @click="closePicker(o.value)">
+        <span class="lbl">{{ o.label }}</span>
+        <i class="dot" :class="{ on: String(o.value) === String(pickerState.value) }"></i>
+      </button>
+    </div>
+    <button type="button" class="btn picker-cancel" @click="closePicker()">{{ t('add.cancel') }}</button>
+  </div>
+</div>
+
+</div>
+
+<script src="./lib/vue.global.prod.js"></script>
+<script src="./js/i18n.js?v=26.11.0"></script>
+<script src="./js/util.js?v=26.11.0"></script>
+<script src="./js/api.js?v=26.11.0"></script>
+<script src="./js/charts.js?v=26.11.0"></script>
+<script src="./js/app.js?v=26.11.0"></script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+[
+  {
+    "stepTitle": "面板端口",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "修改后会重启面板服务使新端口生效。电驴网络端口请在面板的「设置 → 网络」里修改，那里改完会自动重启引擎。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_backend_port",
+        "label": "面板端口 (PANEL_PORT)",
+        "initValue": "17581",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入面板端口"
+          },
+          {
+            "pattern": "^[0-9]+$",
+            "message": "端口必须是数字"
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,30 @@
+{
+    "data-share": {
+        "shares": [
+            {
+                "name": "fn-emule",
+                "permission": {
+                    "rw": [
+                        "fn-emule"
+                    ]
+                }
+            },
+            {
+                "name": "fn-emule/Incoming",
+                "permission": {
+                    "rw": [
+                        "fn-emule"
+                    ]
+                }
+            },
+            {
+                "name": "fn-emule/Temp",
+                "permission": {
+                    "rw": [
+                        "fn-emule"
+                    ]
+                }
+            }
+        ]
+    }
+}

@@ -1,0 +1,9 @@
+#!/bin/bash
+### 卸载后：清掉残留 pid/端口文件；配置目录保留，重装可续用
+set -u
+MAIN_SCRIPT="$(dirname "$0")/main"
+[ -x "${MAIN_SCRIPT}" ] && "${MAIN_SCRIPT}" stop >/dev/null 2>&1 || true
+if [ -n "${TRIM_PKGVAR:-}" ]; then
+    rm -f "${TRIM_PKGVAR}/panel.pid" "${TRIM_PKGVAR}/amuled.pid" "${TRIM_PKGVAR}/runtime-ports.env" 2>/dev/null || true
+fi
+exit 0
