@@ -1408,9 +1408,8 @@ def _diag_public_ip(deadline):
     if not ipv4 and not ipv6:
         error = "；".join(errors[-2:]) or "公网 IP 探测失败"
     elif not ipv6:
-        # v4 拿到了、v6 没有：区分两种情况，给用户一句可操作的说明
-        error = ("未获取到 IPv6 公网地址：设备虽有 IPv6 地址，但当前 DNS（可能是路由器代理的 fake-ip 模式）"
-                 "不返回 AAAA 记录，或运营商未提供 IPv6 出口；不影响 IPv4 下载，Kad/来源也走 IPv4")
+        # v4 拿到了、v6 没有：独立短句，只挂在 IPv6 行，不再污染 IPv4 的检查结果
+        error = "未获取到 IPv6 公网地址（DNS 未返回 AAAA 记录或运营商未提供 IPv6 出口）"
     else:
         error = ""
     return ipv4, ipv6, error
@@ -1585,10 +1584,10 @@ def _diag_degraded_card(runtime, mode, detail, status, deadline):
                                   % (tcp_port, udp_port)))
 
     if host_info["public_ip"]:
-        checks.append(_diag_check("public_ip", "ok", "公网 IP 已获取",
+        checks.append(_diag_check("public_ip", "ok", "公网 IP 已获取 (IPv4)",
                                   "当前公网出口 IP：%s" % host_info["public_ip"]))
     else:
-        checks.append(_diag_check("public_ip", "warn", "获取公网 IP 失败",
+        checks.append(_diag_check("public_ip", "warn", "获取公网 IP 失败 (IPv4)",
                                   host_info["public_ip_error"] or "网络不可达或代理未配置",
                                   "检查设备的网络与代理设置"))
 
@@ -1833,10 +1832,10 @@ def build_diagnostics(runtime):
                                   % (tcp_port, udp_port)))
 
     if public_ip:
-        checks.append(_diag_check("public_ip", "ok", "公网 IP 已获取",
+        checks.append(_diag_check("public_ip", "ok", "公网 IP 已获取 (IPv4)",
                                   "当前公网出口 IP：%s" % public_ip))
     else:
-        checks.append(_diag_check("public_ip", "warn", "获取公网 IP 失败",
+        checks.append(_diag_check("public_ip", "warn", "获取公网 IP 失败 (IPv4)",
                                   public_ip_error or "网络不可达或代理未配置",
                                   "检查设备的网络与代理设置"))
 
