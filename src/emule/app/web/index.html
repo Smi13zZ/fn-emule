@@ -899,13 +899,9 @@
               <dt>{{ t('diag.lanIp') }}</dt><dd class="mono">{{ diagHost.lan_ip || '—' }}</dd>
               <dt>{{ t('diag.gateway') }}</dt><dd class="mono">{{ diagHost.gateway || '—' }}</dd>
               <dt>{{ t('diag.publicIp') }}</dt>
-              <dd class="mono">{{ diagHost.public_ip || '—' }}
-                <span class="faint" v-if="diagHost.public_ip_error"> · {{ diagHost.public_ip_error }}</span>
-              </dd>
+              <dd class="mono">{{ diagHost.public_ip || '—' }}<span class="faint" v-if="!diagHost.public_ip && diagHost.public_ip_error"> · {{ diagHost.public_ip_error }}</span></dd>
               <dt>{{ t('diag.publicIp6') }}</dt>
-              <dd class="mono">{{ diagHost.public_ip6 || '—' }}
-                <span class="faint" v-if="!diagHost.public_ip6"> · {{ diagHost.public_ip_error || t('diag.publicIp6None') }}</span>
-              </dd>
+              <dd class="mono">{{ diagHost.public_ip6 || '—' }}<span class="faint" v-if="!diagHost.public_ip6"> · {{ diagHost.public_ip6_error || t('diag.publicIp6None') }}</span></dd>
               <dt>{{ t('diag.cgnat') }}</dt>
               <dd>{{ diagHost.cgnat_suspect ? t('diag.level.warn') : t('diag.level.ok') }}</dd>
               <dt>{{ t('diag.firewall') }}</dt>
@@ -1288,6 +1284,9 @@
             </button>
           </div>
           <div class="hint err" style="margin-top:10px" v-if="updateError">{{ updateError }}</div>
+          <div class="hint ok" style="margin-top:10px" v-if="updateDownloaded">
+            {{ t('settings.update.downloadedHint', { n: updateDownloaded.name || '', p: '/var/apps/fn-emule/var/updates' }) }}
+          </div>
           <div class="sep"></div>
           <h3>{{ t('settings.update.notes') }}</h3>
           <div class="relnotes" v-if="updateInfo && updateInfo.notes">{{ updateInfo.notes }}</div>
