@@ -95,6 +95,9 @@ eMule 电驴把 **aMule**（eMule 在 Linux 上的官方同源实现）做成了
 
 ### 方式一：应用中心手动安装（推荐）
 
+> 最新安装包见 **GitHub Releases**：<https://github.com/Smi13zZ/fn-emule/releases/latest>
+> （每次推 `v*` 标签，Actions 会自动在 Debian 12 容器里构建并发布，产物是单包 `-fnos-all.fpk`）
+
 1. 下载 `fn-emule-26.11.4-fnos-all.fpk`（**一个包，x86_64 与 ARM 通用**，不用挑架构）；
 2. 飞牛 fnOS → **应用中心 → 手动安装** → 选择该文件；
 3. 安装向导里确认**面板端口**（默认 17581）与**电驴网络端口**（默认 TCP 4662 / UDP 4672）；
