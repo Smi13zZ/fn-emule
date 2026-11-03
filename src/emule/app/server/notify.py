@@ -4,7 +4,7 @@
 每个通道都是一个小适配器，把 (title, body) 变成一次 HTTP 请求；只用标准库，
 和面板其余部分保持一致。
 
-从 qbpanel 的 notify.py 迁移而来，字段与行为保持兼容：
+通知通道实现，字段与行为保持兼容：
 * 老通道（Bark / Server 酱 / PushPlus / WxPusher / 自定义 Webhook）的
   CHANNEL_TYPES 键名、config 字段名、SECRET_MARK 语义一字未改，
   老用户的通知配置直接搬过来就能发。

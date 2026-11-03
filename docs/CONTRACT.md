@@ -29,7 +29,7 @@ UI 文案：中文为主，英文完整对照（i18n），品牌名一律 `eMule
 fn-emule/
   docs/                    契约、开发说明、使用教程
   research/amule-ec-src/   aMule 2.3.3 EC 协议 C++ 源码（只读参考，勿改）
-  reference/qbpanel-repo/  qbpanel 参考源码（只读，勿改；UI 从这里搬）
+  reference/               外部参考源码（只读，勿改）
   src/emule/               fpk 源码根（fnpack build 就在这个目录跑）
   tools/                   构建/校验/取 runtime 的脚本
   output/                  最终 .fpk
@@ -55,7 +55,7 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
         service.py           领域门面（ec-core 负责，接口见 §4）
         bootstrap.py         server.met / nodes.dat / ipfilter 下载（ec-core 负责）
         store.py             面板设置持久化 + 历史/通知记录（panel-api 负责）
-      notify.py              通知通道（panel-api 负责，从 qbpanel 改）
+      notify.py              通知通道（panel-api 负责）
       netutil.py             HTTP 抓取（urllib，支持系统代理）（panel-api 负责）
     web/                    前端（web-ui 负责）
       index.html style.css
@@ -244,7 +244,7 @@ class EmuleService:
 
 1. **每个 cmd/* 脚本必须有 shebang**（`#!/bin/bash`）。缺 shebang 时 appcenter 会报
    `10237: fork/exec .../cmd/install_init: exec format error` 并回滚安装。
-2. **图标尺寸**：`ICON.PNG` 必须 64x64，`ICON_256.PNG` 必须 256x256（照 qbpanel 的实际产物）。
+2. **图标尺寸**：`ICON.PNG` 必须 64x64，`ICON_256.PNG` 必须 256x256（实测值，尺寸不符会被拒装）。
 3. **必须是 Linux 上 fnpack 打的包**：Windows 打的包会丢可执行位 → `10111`。
    构建统一走 `python tools/build_fpk.py`（tar → NAS → chmod → fnpack build → 取回 → 校验）。
 4. **安装/升级用 appcenter-cli**（测试机已装）：

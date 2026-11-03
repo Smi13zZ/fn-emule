@@ -179,6 +179,18 @@ def main():
         raise SystemExit("语法检查失败，已中止打包")
     print("       %d 个文件通过" % len(py_files))
 
+    # 结构闸门：语法合法但方法缩进跑偏（类上少方法）这种错误，py_compile 抓不到，
+    # 装到设备上要等真实请求才报 AttributeError。
+    print("[0b/3] 结构检查（类方法是否齐全）")
+    checker = os.path.join(os.path.dirname(os.path.abspath(__file__)), "check_structure.py")
+    struct = subprocess.run([sys.executable, checker] + py_files,
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if struct.returncode != 0:
+        sys.stderr.write(struct.stdout)
+        sys.stderr.write(struct.stderr)
+        raise SystemExit("结构检查失败，已中止打包")
+    print("       结构正常")
+
     platforms = [p.strip() for p in args.platforms.split(",") if p.strip()]
     for p in platforms:
         if p not in PLATFORM_ARCH:

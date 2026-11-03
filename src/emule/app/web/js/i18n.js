@@ -1,4 +1,4 @@
-/* fn-emule - i18n. Flat dot-keys (qbpanel convention, e.g. overview.dl),
+/* fn-emule - i18n. Flat dot-keys (e.g. overview.dl),
  * {var} interpolation, zh (default) + en. Every user-visible string in the
  * panel lives here - the templates never hard-code copy. */
 (function () {

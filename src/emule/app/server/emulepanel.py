@@ -6,7 +6,7 @@
 1. HTTP 服务（ThreadingHTTPServer，监听 0.0.0.0:17581，fnOS 的 CGI 代理需要
    走本机回环），按 docs/CONTRACT.md §3 提供 ./api 下的全部接口；
 2. 静态服务器，把 <app_home>/web 原样发给浏览器（no-store，不做 history 路由，
-   视图状态全在前端 JS 里，和 qbpanel 一致）；
+   视图状态全在前端 JS 里）；
 3. aMule 引擎的所有者：启动时 service.prepare() + service.start()，收到
    SIGTERM/SIGINT 时先 service.stop() 再退出，绝不留孤儿 amuled。
 
@@ -1054,7 +1054,7 @@ def normalize_server(item):
 
 
 def notify_record_public(record):
-    """通知记录同时给新旧两套字段：t/text（qbpanel 风格）和 at/body（本面板内部）。"""
+    """通知记录同时给新旧两套字段：t/text（前端展示）和 at/body（面板内部）。"""
     record = as_dict(record)
     at = int_or(record.get("at") or record.get("t"))
     body = str(record.get("body") or record.get("text") or "")
@@ -2780,28 +2780,6 @@ class Handler(BaseHTTPRequestHandler):
 
         self.fail(404, "接口不存在：%s" % path)
 
-def validate_fpk(path):
-    """卸载之前先确认下载的 fpk 是合法的本应用安装包（结构 + appname）。"""
-    import tarfile
-    try:
-        with tarfile.open(path, "r:gz") as tf:
-            names = tf.getnames()
-            if "manifest" not in names or "app.tgz" not in names:
-                raise ValueError("安装包结构不完整")
-            raw = tf.extractfile("manifest").read().decode("utf-8", "replace")
-    except ValueError:
-        raise
-    except Exception as exc:
-        raise ValueError("安装包无法解压：%s" % exc)
-    appname = ""
-    for line in raw.splitlines():
-        if line.strip().startswith("appname"):
-            appname = line.split("=", 1)[1].strip()
-            break
-    if appname != "fn-emule":
-        raise ValueError("安装包应用名不匹配：%s" % (appname or "?"))
-
-
     # -- 更新安装（只下载，不调用 fnOS 安装器） -----------------------------
     def install_update(self):
         info = RT.update_checker.check(force=True)
@@ -2916,6 +2894,28 @@ def validate_fpk(path):
     def require_method(self, method, expected):
         if method != expected:
             self.fail(405, "不支持的请求方法：%s" % method)
+
+def validate_fpk(path):
+    """卸载之前先确认下载的 fpk 是合法的本应用安装包（结构 + appname）。"""
+    import tarfile
+    try:
+        with tarfile.open(path, "r:gz") as tf:
+            names = tf.getnames()
+            if "manifest" not in names or "app.tgz" not in names:
+                raise ValueError("安装包结构不完整")
+            raw = tf.extractfile("manifest").read().decode("utf-8", "replace")
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError("安装包无法解压：%s" % exc)
+    appname = ""
+    for line in raw.splitlines():
+        if line.strip().startswith("appname"):
+            appname = line.split("=", 1)[1].strip()
+            break
+    if appname != "fn-emule":
+        raise ValueError("安装包应用名不匹配：%s" % (appname or "?"))
+
 
 
 # --------------------------------------------------------------------------

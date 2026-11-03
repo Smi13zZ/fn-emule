@@ -8,7 +8,7 @@ name: build-fpk
 # 必须在 Debian 12 容器里构建：内置的 aMule 二进制取自 bookworm，用更新的发行版
 # 构建会带进更高的 glibc 依赖，fnOS 上跑不起来。
 #
-# 单包多架构做法（与 qbpanel 的 -fnos-all.fpk 一致）：
+# 单包多架构做法：
 #   * manifest 的 platform = all；
 #   * 包里同时带 runtime/amd64 与 runtime/arm64 两套引擎（aMule + 依赖库），
 #     面板启动时按 platform.machine() 自动选；
@@ -82,10 +82,13 @@ jobs:
           du -sh /tmp/runtime-extract/amd64 /tmp/runtime-extract/arm64
           file /tmp/runtime-extract/amd64/usr/bin/amuled /tmp/runtime-extract/arm64/usr/bin/amuled
 
-      - name: 语法闸门 + 准备打包目录
+      - name: 语法闸门 + 结构闸门 + 准备打包目录
         run: |
           set -euo pipefail
           python3 -m py_compile $(find src/emule/app/server -name "*.py")
+          # 结构闸门：语法合法但方法缩进跑偏（类上少方法）这类错误 py_compile 抓不到，
+          # 打进去后要等真实请求打进来才报 AttributeError，必须在这里拦住。
+          python3 tools/check_structure.py $(find src/emule/app/server -name "*.py")
           rm -rf /tmp/build && mkdir -p /tmp/build
           cp -a src/emule/. /tmp/build/
           find /tmp/build -name "__pycache__" -type d -prune -exec rm -rf {} +

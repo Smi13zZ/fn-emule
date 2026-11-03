@@ -1,4 +1,4 @@
-/* fn-emule - design tokens (shadcn / neutral scale, inherited from qbpanel)
+/* fn-emule - design tokens (shadcn / neutral scale)
  * Same visual system as the qBittorrent panel: restrained neutral palette,
  * one accent, 10px controls / 14px cards, hairline borders, mono numerals.
  * light: surface #ffffff, sidebar #fafafa, muted #f5f5f5, border #e5e5e5, fg #0a0a0a
@@ -450,7 +450,7 @@ input[type="number"] { -moz-appearance: textfield; }
 .ttable.tbackup tbody td { height: 42px; padding-top: 0; padding-bottom: 0; }
 /* size under the name is the phone layout only (see the 640px block) */
 .ttable.tbackup .bmeta { display: none; font-size: 11px; margin-top: 1px; }
-/* phones show the timestamp only - the shared "qbpanel-backup-" prefix eats
+/* phones show the timestamp only - the shared backup-file prefix eats
    more than a third of the row and every entry starts with it anyway */
 .ttable.tbackup .bname-short { display: none; }
 .ttable .sub { font-size: 12px; color: var(--faint); margin-top: 3px; display: flex; gap: 8px; flex-wrap: wrap; }
@@ -973,7 +973,7 @@ canvas { display: block; width: 100%; height: 100%; }
   .nlogrow { gap: 8px; padding: 9px 10px; }
 
   /* Backup rows on a phone: the fixed 96px size column left the filename with
-     "qbpanel…" and every row looked identical. Drop the column, print the size
+     "…" and every row looked identical. Drop the column, print the size
      under the name, and hand the freed width back to the filename. */
   .ttable.tbackup th, .ttable.tbackup td { padding-left: 8px; padding-right: 8px; }
   .ttable.tbackup .num { display: none; }

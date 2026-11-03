@@ -1,6 +1,6 @@
 /* fn-emule - formatting helpers and eD2k/Kad transfer metadata
  *
- * Numbers follow the qbpanel conventions this panel inherits: 1024-based byte
+ * Numbers use 1024-based byte
  * units (KB/MB/GB/TB), speed as "<size>/s", percentages with two decimals,
  * durations as hh:mm:ss. UI copy lives in i18n.js - this file only carries
  * machine keys and tones.
