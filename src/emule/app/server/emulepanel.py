@@ -1332,7 +1332,7 @@ def _diag_firewall(tcp_port, udp_port, deadline):
 
 
 def _diag_public_ip(deadline):
-    """双栈探测公网 IP：返回 (ipv4, ipv6, error)。
+    """双栈探测公网 IP：返回 (ipv4, ipv6, error4, error6)。
 
     两种网络环境都要能工作：
     - 直连网络：按 family 钉死请求（getaddrinfo 只解析 A / AAAA）；
@@ -1405,14 +1405,18 @@ def _diag_public_ip(deadline):
             if got:
                 ipv6 = got
                 break
-    if not ipv4 and not ipv6:
-        error = "；".join(errors[-2:]) or "公网 IP 探测失败"
-    elif not ipv6:
-        # v4 拿到了、v6 没有：独立短句，只挂在 IPv6 行，不再污染 IPv4 的检查结果
-        error = "未获取到 IPv6 公网地址（DNS 未返回 AAAA 记录或运营商未提供 IPv6 出口）"
-    else:
-        error = ""
-    return ipv4, ipv6, error
+    # v4 与 v6 的错误分开记：v4 的原因挂在 IPv4 行，v6 的原因挂在 IPv6 行，
+    # 不再共用一个字段（用户反馈：IPv4 行不该出现 IPv6 的说明）。
+    error4 = ""
+    error6 = ""
+    v4_errors = [e for e in errors if "(IPv4)" in e]
+    v6_errors = [e for e in errors if "(IPv6)" in e]
+    if not ipv4:
+        error4 = "；".join(v4_errors[-2:]) or "公网 IPv4 探测失败"
+    if not ipv6:
+        error6 = "；".join(v6_errors[-2:]) or \
+            "未获取到 IPv6 公网地址（DNS 未返回 AAAA 记录或运营商未提供 IPv6 出口）"
+    return ipv4, ipv6, error4, error6
 
 
 def _is_private_ip(text):
@@ -1454,7 +1458,7 @@ def _diag_engine_probe(runtime):
 def _diag_local_facts(deadline, tcp_port, udp_port):
     """只读的本机事实：网卡/路由/端口监听/防火墙/公网 IP。不发任何 EC 请求。"""
     host_info = {"lan_ip": "", "gateway": "", "iface": "",
-                 "public_ip": "", "public_ip_error": "", "public_ip6": "", "public_ip6": "",
+                 "public_ip": "", "public_ip_error": "", "public_ip6": "", "public_ip6_error": "",
                  "private_ip": False, "cgnat_suspect": False}
     route_ok, route_out, _err = _run_readonly(["ip", "-4", "route", "get", "1.1.1.1"],
                                               _diag_probe_timeout(deadline))
@@ -1473,10 +1477,11 @@ def _diag_local_facts(deadline, tcp_port, udp_port):
     udp_ok, udp_lines, udp_err = _diag_ss_count(
         ["ss", "-Huln", "sport = :%d" % udp_port] if udp_port else ["ss", "-Huln"], deadline)
     firewall, firewall_detail = _diag_firewall(tcp_port, udp_port, deadline)
-    public_ip, public_ip6, public_ip_error = _diag_public_ip(deadline)
+    public_ip, public_ip6, public_ip_error, public_ip6_error = _diag_public_ip(deadline)
     host_info["public_ip"] = public_ip
     host_info["public_ip6"] = public_ip6
     host_info["public_ip_error"] = public_ip_error
+    host_info["public_ip6_error"] = public_ip6_error
     host_info["cgnat_suspect"] = _is_cgnat(public_ip)
     facts = {
         "host": host_info,
@@ -1690,7 +1695,7 @@ def build_diagnostics(runtime):
 
     # ---- 本机侧探测 ----
     host_info = {"lan_ip": "", "gateway": "", "iface": "",
-                 "public_ip": "", "public_ip_error": "", "public_ip6": "", "public_ip6": "",
+                 "public_ip": "", "public_ip_error": "", "public_ip6": "", "public_ip6_error": "",
                  "private_ip": False, "cgnat_suspect": False}
     route_ok, route_out, _route_err = _run_readonly(["ip", "-4", "route", "get", "1.1.1.1"],
                                                     _diag_probe_timeout(deadline))
@@ -1712,10 +1717,11 @@ def build_diagnostics(runtime):
     udp_bound = bool(udp_ok and udp_lines > 0)
 
     firewall_state, firewall_detail = _diag_firewall(tcp_port, udp_port, deadline)
-    public_ip, public_ip6, public_ip_error = _diag_public_ip(deadline)
+    public_ip, public_ip6, public_ip_error, public_ip6_error = _diag_public_ip(deadline)
     host_info["public_ip"] = public_ip
     host_info["public_ip6"] = public_ip6
     host_info["public_ip_error"] = public_ip_error
+    host_info["public_ip6_error"] = public_ip6_error
     host_info["cgnat_suspect"] = _is_cgnat(public_ip)
 
     engine_payload = {
