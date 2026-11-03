@@ -1,0 +1,18 @@
+# 构建产物
+output/
+*.fpk
+src/emule/emule.fpk
+
+# 运行时二进制（由 tools/prepare_runtime.sh 生成，不入库）
+src/emule/app/runtime/
+
+# 本地临时
+tmp/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+
+# 只读参考源码
+reference/
+research/amule-ec-src/
