@@ -31,6 +31,11 @@ concurrency:
 env:
   FNPACK_URL: https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64
 
+# 容器任务里 run: 默认用的是 sh（dash），不支持 set -o pipefail，统一改用 bash
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     runs-on: ubuntu-24.04
