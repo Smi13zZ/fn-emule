@@ -90,11 +90,12 @@ def _walk_self(body):
     return used, assigned
 
 
-def check_file(path):
-    with open(path, "rb") as handle:
-        src = handle.read()
+def check_source(src, label="<source>"):
+    """对源码字节做结构检查，返回问题列表（空列表表示通过）。"""
+    if isinstance(src, str):
+        src = src.encode("utf-8")
     try:
-        tree = ast.parse(src, filename=path)
+        tree = ast.parse(src, filename=label)
     except SyntaxError as exc:
         return ["语法错误：%s" % exc]
 
@@ -150,6 +151,11 @@ def check_file(path):
                             % (node.name, ", ".join(missing)))
 
     return problems
+
+
+def check_file(path):
+    with open(path, "rb") as handle:
+        return check_source(handle.read(), path)
 
 
 def main(argv):

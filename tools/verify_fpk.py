@@ -15,7 +15,6 @@ import os
 import re
 import sys
 import tarfile
-import tempfile
 
 # app.tgz 里必须存在的文件（相对 app/ 根）
 NEED_INNER = [
@@ -118,15 +117,13 @@ def main():
         # 语法合法但方法缩进跑偏时类上会少方法，装到设备上才报 AttributeError。
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import check_structure
-        with tempfile.TemporaryDirectory() as tmpdir:
-            py_names = [n for n in inner_members if n.endswith(".py")]
-            for name in py_names:
-                dest = os.path.join(tmpdir, os.path.basename(name))
-                with open(dest, "wb") as handle:
-                    handle.write(inner.extractfile(inner_members[name]).read())
-                problems = check_structure.check_file(dest)
-                if problems:
-                    fail("%s 结构有问题：%s" % (name, "；".join(problems)))
+        # 直接在内存里解析源码，不落地：包里同名文件（如多个 __init__.py）不会互相覆盖，
+        # 也不会受临时目录权限影响。
+        for name in sorted(n for n in inner_members if n.endswith(".py")):
+            source = inner.extractfile(inner_members[name]).read()
+            problems = check_structure.check_source(source, name)
+            if problems:
+                fail("%s 结构有问题：%s" % (name, "；".join(problems)))
 
     size = os.path.getsize(path)
     print("OK  %s" % os.path.basename(path))
