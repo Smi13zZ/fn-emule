@@ -285,6 +285,30 @@
       engineStarting: function () {
         return ["preparing", "starting"].indexOf(this.enginePhase) >= 0;
       },
+      engineRunning: function () {
+        if (this.health && this.health.amule) return !!this.health.amule.running;
+        return false;
+      },
+      engineVersionText: function () {
+        return (this.health && this.health.amule && this.health.amule.version) || "";
+      },
+      engineUptimeText: function () {
+        const st = this.health && this.health.engine || {};
+        return st.uptime ? this.fmt.fmtDuration(st.uptime) : "";
+      },
+      engineDotClass: function () {
+        if (this.engineStarting) return "warn";
+        return this.engineRunning ? "on" : "err";
+      },
+      engineStatusText: function () {
+        if (this.coreWorking) return this.t("engine.working");
+        if (this.engineStarting) return this.t("engine.banner.startText");
+        if (this.engineRunning) return this.t("engine.state.running");
+        return this.t("engine.state.stopped");
+      },
+      engineBarVisible: function () {
+        return this.loaded && !this.panelDown;
+      },
       engineDown: function () {
         if (!this.loaded) return false;
         if (this.engineStarting) return false;
@@ -788,6 +812,39 @@
       },
 
       /* ---------------- engine control ---------------- */
+      restartEngine: async function () {
+        if (this.coreWorking) return;
+        this.coreWorking = true;
+        this.engineBarNote = "";
+        const op = this.engineRunning ? "restart" : "start";
+        try {
+          await window.EMU_API.core(op);
+          this.ok(op === "restart" ? "engine.restarted" : "engine.banner.started");
+          // 引擎起 EC 要几秒，轮询 health 直到 running:true 或超时
+          let up = false;
+          for (let i = 0; i < 20; i++) {
+            await new Promise((r) => setTimeout(r, 1000));
+            try {
+              const h = await window.EMU_API.health();
+              this.health = h || {};
+              if (h && h.amule && h.amule.running && h.amule.ec) { up = true; break; }
+            } catch (e) { /* 面板忙，继续等 */ }
+          }
+          if (up) {
+            this.engineBarNote = "";
+            this.ok("engine.state.running");
+          } else {
+            this.engineBarNote = (this.health && this.health.engine && this.health.engine.detail) ||
+              this.t("engine.slowStart");
+          }
+          await this.bootstrapPanel();
+        } catch (e) {
+          this.fail("err.opFailed", e);
+        } finally {
+          this.coreWorking = false;
+        }
+      },
+
       startEngine: async function () {
         if (this.coreStarting) return;
         this.coreStarting = true;
@@ -1340,6 +1397,8 @@
           this.fail("settings.saveFailed", e);
         } finally {
           this.settingsSaving = false;
+        this.coreWorking = false;
+        this.engineBarNote = "";
         }
       },
       saveSettingsDraft: async function () {
@@ -1363,9 +1422,27 @@
           const restart = (res && res.restart_required !== undefined) ? !!res.restart_required : localRestart;
           if (restart) {
             this.ok("settings.restartHint");
-            setTimeout(() => { this.bootstrapPanel(); }, 2500);
+            this.engineBarNote = this.t("settings.restartWatch");
+            setTimeout(() => { this.bootstrapPanel().then(() => {
+              // 引擎重启是异步的，2.5s 往往还没就绪，继续轮询到 running
+              let n = 0;
+              const poll = setInterval(async () => {
+                n++;
+                try {
+                  const h = await window.EMU_API.health();
+                  this.health = h || {};
+                  if (h && h.amule && h.amule.running && h.amule.ec) {
+                    clearInterval(poll);
+                    this.engineBarNote = "";
+                    this.ok("engine.state.running");
+                  }
+                } catch (e) { /* ignore */ }
+                if (n >= 20) { clearInterval(poll); }
+              }, 1000);
+            }); }, 2500);
           } else {
             this.ok("settings.saved");
+            this.engineBarNote = "";
           }
           await this.loadPrefs();
         } catch (e) {
