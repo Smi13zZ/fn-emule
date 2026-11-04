@@ -479,6 +479,14 @@ class Runtime(object):
         self._shutdown_done = False
         self.threads = []
         self.update_checker = UpdateChecker(store)
+        # 更新任务的进度状态：下载放到后台线程里跑，前端轮询这个结构拿百分比。
+        # 同步在请求里下载没法回报进度，慢的时候界面只能干等，用户以为卡死了。
+        self._update_task = {
+            "running": False, "phase": "idle", "percent": 0,
+            "received": 0, "total": 0, "error": "", "name": "",
+            "version": "", "started_at": 0, "finished_at": 0,
+        }
+        self._update_lock = threading.Lock()
         self._notify_state = {}
         self._notify_lock = threading.Lock()
         self._notify_miss = 0
@@ -2807,10 +2815,23 @@ class Handler(BaseHTTPRequestHandler):
             self.install_update()
             return
 
+        if path == "/api/update/progress":
+            self.require_method(method, "GET")
+            self.update_progress()
+            return
+
         self.fail(404, "接口不存在：%s" % path)
 
     # -- 更新安装（只下载，不调用 fnOS 安装器） -----------------------------
+    # -- 更新安装（后台任务：下载进度可轮询） -------------------------------
     def install_update(self):
+        """启动更新任务，立即返回；真实下载在后台线程里跑，前端轮询 /api/update/progress。"""
+        with RT._update_lock:
+            if RT._update_task.get("running"):
+                self.send_json({"ok": True, "started": False,
+                                "task": dict(RT._update_task),
+                                "note": "更新已在进行中"})
+                return
         info = RT.update_checker.check(force=True)
         if not info.get("ok"):
             self.fail(502, "无法获取版本信息：%s" % (info.get("error") or "未知原因"))
@@ -2832,81 +2853,25 @@ class Handler(BaseHTTPRequestHandler):
         if not name.lower().endswith(".fpk"):
             self.fail(400, "安装包文件名不合法")
             return
+        version = str(info.get("latest") or "")
+        with RT._update_lock:
+            RT._update_task = {
+                "running": True, "phase": "downloading", "percent": 0,
+                "received": 0, "total": 0, "error": "", "name": name,
+                "version": version, "started_at": int(time.time()), "finished_at": 0,
+            }
+        url = str(picked.get("url") or "")
         dest = os.path.join(RT.store.updates_dir(), name)
-        try:
-            result = netutil.download(picked.get("url"), dest, timeout=180.0, retries=1)
-        except netutil.FetchError as exc:
-            RT.log("更新包下载失败：%s" % (exc,), level="error")
-            self.fail(502, "下载安装包失败：%s" % (exc,))
-            return
-        validate_fpk(result["path"])
-        RT.log("更新包已下载并通过校验：%s（%d 字节）" % (result["path"], result["size"]))
+        thread = threading.Thread(target=run_update_task, args=(url, dest, name, version),
+                                  name="update-install", daemon=True)
+        thread.start()
+        self.send_json({"ok": True, "started": True, "name": name, "version": version,
+                        "task": dict(RT._update_task)})
 
-        # 覆盖升级流程：stop → uninstall → install-fpk → start（fnOS 不支持直接覆盖安装）。
-        # 实测 fnOS 的 uninstall 不删除 @appdata（面板设置与下载进度都保留），
-        # 所以覆盖升级是安全的。脚本以后台方式运行（面板进程本身会被重启）。
-        var_dir = RT.store.var_dir
-        panel_cfg = as_dict(RT.store.section("panel"))
-        engine_cfg = as_dict(RT.store.section("engine"))
-        env_path = os.path.join(var_dir, "update.env")
-        with open(env_path, "w", encoding="utf-8") as handle:
-            handle.write("wizard_backend_port=%d\n" % int_or(panel_cfg.get("port"), 17581))
-            handle.write("wizard_tcp_port=%d\n" % int_or(engine_cfg.get("tcp_port"), 4662))
-            handle.write("wizard_udp_port=%d\n" % int_or(engine_cfg.get("udp_port"), 4672))
-        script_path = os.path.join(var_dir, "update-install.sh")
-        lines = [
-            "#!/bin/bash",
-            "set -u",
-            'APP_NAME="fn-emule"',
-            "FPK=" + shlex.quote(result["path"]),
-            "ENV_FILE=" + shlex.quote(env_path),
-            "LOG=" + shlex.quote(var_dir.rstrip("/") + "/update-install.log"),
-            'exec 9>>"$LOG"',
-            'log() { echo "[$(date +%F_%T)] $*" >&9; }',
-            'log "开始更新安装：$FPK"',
-            'appcenter-cli stop "$APP_NAME" >/dev/null 2>&1 || true',
-            "sleep 2",
-            'appcenter-cli uninstall "$APP_NAME" 2>&1 | tr "\\r" "\\n" | tail -1 >&9',
-            "sleep 2",
-            'appcenter-cli install-fpk "$FPK" -e "$ENV_FILE" -v 1 2>&1'
-            ' | tr "\\r" "\\n" | grep -vE "installing|Verifying" | tail -3 >&9',
-            "sleep 2",
-            "started=0",
-            "n=0",
-            'while [ "$n" -lt 6 ]; do',
-            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting";'
-            " then started=1; break; fi",
-            '  appcenter-cli start "$APP_NAME" 2>&1 | tail -1 >&9',
-            "  sleep 3",
-            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting";'
-            " then started=1; break; fi",
-            "  n=$((n + 1))",
-            "done",
-            'if [ "$started" != "1" ]; then log "新版本未能启动，详见日志"; exit 1; fi',
-            'log "更新安装脚本结束"',
-            "",
-        ]
-        script = "\n".join(lines)
-        with open(script_path, "w", encoding="utf-8") as handle:
-            handle.write(script)
-        os.chmod(script_path, 0o755)
-        # 立刻做一次 bash 语法检查：脚本要等面板重启后才执行，写坏了就只能靠人工
-        # 翻日志，这一步能把"拼串拼错"挡在下载完成之后、卸载之前。
-        check = subprocess.run(["/bin/bash", "-n", script_path],
-                               capture_output=True, text=True, encoding="utf-8", errors="replace")
-        if check.returncode != 0:
-            detail = (check.stderr or "").strip().splitlines()
-            RT.log("生成的升级脚本语法有误：%s" % (detail[:2] or check.returncode), level="error")
-            self.fail(500, "升级脚本生成失败（bash 语法校验未通过），已中止更新：%s"
-                      % (detail[0] if detail else check.returncode))
-            return
-        RT.log("启动后台更新脚本，面板即将重启")
-        subprocess.Popen(["/bin/bash", "-c",
-                          "exec setsid \"%s\" >/dev/null 2>&1 < /dev/null &" % script_path],
-                         cwd=var_dir, start_new_session=True)
-        self.send_json({"ok": True, "path": result["path"], "name": name,
-                        "size": result["size"], "version": info.get("latest") or "",
-                        "note": "安装包已下载，正在后台执行覆盖升级（面板会短暂离线后自动恢复）"})
+    def update_progress(self):
+        with RT._update_lock:
+            task = dict(RT._update_task)
+        self.send_json({"ok": True, "task": task, "version": RT.version})
 
     # -- 小工具 -------------------------------------------------------------
     def delete_notify_channel(self, channel_id):
@@ -2938,6 +2903,111 @@ class Handler(BaseHTTPRequestHandler):
     def require_method(self, method, expected):
         if method != expected:
             self.fail(405, "不支持的请求方法：%s" % method)
+
+
+# --------------------------------------------------------------------------
+# 后台更新任务：下载 → 校验 → 生成升级脚本 → 启动
+# --------------------------------------------------------------------------
+def _update_task_set(**kwargs):
+    with RT._update_lock:
+        RT._update_task.update(kwargs)
+
+
+def run_update_task(url, dest, name, version):
+    """在后台线程里完成下载与升级脚本启动，进度写进 RT._update_task。"""
+    def on_progress(received, total):
+        percent = int(received * 100 / total) if total else 0
+        _update_task_set(received=int(received), total=int(total or 0),
+                         percent=max(0, min(100, percent)), phase="downloading")
+
+    try:
+        result = netutil.download(url, dest, timeout=600.0, retries=2, progress=on_progress)
+    except netutil.FetchError as exc:
+        RT.log("更新包下载失败：%s" % (exc,), level="error")
+        _update_task_set(running=False, phase="error", error="下载安装包失败：%s" % (exc,),
+                         finished_at=int(time.time()))
+        return
+
+    _update_task_set(phase="verifying", percent=100, received=int(result.get("size") or 0),
+                     total=int(result.get("size") or 0))
+    try:
+        validate_fpk(result["path"])
+    except ValueError as exc:
+        RT.log("更新包校验失败：%s" % (exc,), level="error")
+        _update_task_set(running=False, phase="error", error="安装包校验失败：%s" % (exc,),
+                         finished_at=int(time.time()))
+        return
+    RT.log("更新包已下载并通过校验：%s（%d 字节）" % (result["path"], result["size"]))
+
+    _update_task_set(phase="installing")
+    try:
+        var_dir = RT.store.var_dir
+        panel_cfg = as_dict(RT.store.section("panel"))
+        engine_cfg = as_dict(RT.store.section("engine"))
+        env_path = os.path.join(var_dir, "update.env")
+        with open(env_path, "w", encoding="utf-8") as handle:
+            handle.write("wizard_backend_port=%d\n" % int_or(panel_cfg.get("port"), 17581))
+            handle.write("wizard_tcp_port=%d\n" % int_or(engine_cfg.get("tcp_port"), 4662))
+            handle.write("wizard_udp_port=%d\n" % int_or(engine_cfg.get("udp_port"), 4672))
+        script_path = os.path.join(var_dir, "update-install.sh")
+        script_lines = [
+            "#!/bin/bash",
+            "set -u",
+            'APP_NAME="fn-emule"',
+            "FPK=" + shlex.quote(result["path"]),
+            "ENV_FILE=" + shlex.quote(env_path),
+            "LOG=" + shlex.quote(var_dir.rstrip("/") + "/update-install.log"),
+            'exec 9>>"$LOG"',
+            'log() { echo "[$(date +%F_%T)] $*" >&9; }',
+            'log "开始更新安装：$FPK"',
+            'appcenter-cli stop "$APP_NAME" >/dev/null 2>&1 || true',
+            "sleep 2",
+            'appcenter-cli uninstall "$APP_NAME" 2>&1 | tr "\\r" "\\n" | tail -1 >&9',
+            "sleep 2",
+            'appcenter-cli install-fpk "$FPK" -e "$ENV_FILE" -v 1 2>&1'
+            ' | tr "\\r" "\\n" | grep -vE "installing|Verifying" | tail -3 >&9',
+            "sleep 2",
+            "started=0",
+            "n=0",
+            'while [ "$n" -lt 10 ]; do',
+            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting";'
+            " then started=1; break; fi",
+            '  appcenter-cli start "$APP_NAME" 2>&1 | tail -1 >&9',
+            "  sleep 3",
+            '  if appcenter-cli status "$APP_NAME" 2>/dev/null | grep -qE "running|starting";'
+            " then started=1; break; fi",
+            "  n=$((n + 1))",
+            "done",
+            'if [ "$started" != "1" ]; then log "新版本未能启动，详见日志"; exit 1; fi',
+            'log "更新安装脚本结束"',
+            "",
+        ]
+        script = "\n".join(script_lines)
+        with open(script_path, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        os.chmod(script_path, 0o755)
+        check = subprocess.run(["/bin/bash", "-n", script_path],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if check.returncode != 0:
+            detail = (check.stderr or "").strip().splitlines()
+            RT.log("生成的升级脚本语法有误：%s" % (detail[:2] or check.returncode), level="error")
+            _update_task_set(running=False, phase="error",
+                             error="升级脚本生成失败（bash 语法校验未通过）：%s"
+                                   % (detail[0] if detail else check.returncode),
+                             finished_at=int(time.time()))
+            return
+        RT.log("启动后台更新脚本，面板即将重启")
+        subprocess.Popen(["/bin/bash", "-c",
+                          "exec setsid \"%s\" >/dev/null 2>&1 < /dev/null &" % script_path],
+                         cwd=var_dir, start_new_session=True)
+        _update_task_set(phase="restarting", percent=100,
+                         finished_at=int(time.time()))
+        # running 保持 True 直到面板被替换重启 —— 前端据此一直显示进度弹窗
+    except Exception as exc:  # noqa: BLE001 - 后台线程里任何异常都要落进任务状态
+        RT.log("更新任务异常：%r" % (exc,), level="error")
+        _update_task_set(running=False, phase="error", error="更新失败：%s" % (exc,),
+                         finished_at=int(time.time()))
+
 
 def validate_fpk(path):
     """卸载之前先确认下载的 fpk 是合法的本应用安装包（结构 + appname）。"""

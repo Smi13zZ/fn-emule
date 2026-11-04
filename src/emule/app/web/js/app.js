@@ -212,6 +212,8 @@
         updateInstallDetail: "",
         /* 全局更新提示条：发现新版本后在每个页面顶部提示，关掉后本次会话不再出现 */
         updateBanner: true,
+        /* 一键更新的下载进度（后台任务轮询回来的） */
+        updateProgress: { percent: 0, phase: "idle", received: 0, total: 0 },
         installTimer: null,
 
         addOpen: false,
@@ -1701,23 +1703,96 @@
           },
         };
       },
+      /* 一键更新：面板在后台下载 + 校验 + 生成升级脚本，这里轮询进度。
+         弹窗一直留着，直到面板被新版本替换、页面自动重连成功为止。 */
       runInstall: async function () {
+        if (this.updateInstalling) return;
         this.updateInstalling = true;
+        this.updateError = "";
+        this.updateDownloaded = null;
+        this.updateProgress = { percent: 0, phase: "downloading", received: 0, total: 0 };
         this.updateInstallDetail = this.t("settings.update.installingDownload");
+        this._updateFromVersion = this.appVersion;
         try {
           const r = await window.EMU_API.installUpdate();
           if (r && r.ok === false) throw new Error(r.error || "");
-          // 面板只负责下载 fpk（fnOS 没有面向应用的覆盖安装接口，强行 uninstall 会清掉
-          // 用户设置），所以下载完成后明确告知去应用中心手动安装，而不是轮询版本号
-          // 造成"一直更新超时"的假象。
-          this.updateInstalling = false;
-          this.updateInstallDetail = "";
-          this.updateDownloaded = r || {};
-          this.ok("settings.update.downloaded", { v: r && r.version ? r.version : "" });
+          if (r && r.task) this.applyUpdateTask(r.task);
+          this.pollUpdateProgress(r && r.version ? r.version : "");
         } catch (e) {
           this.updateInstalling = false;
           this.updateError = this.t("settings.update.installFailed", { v: (e && e.message) || "" });
         }
+      },
+      applyUpdateTask: function (task) {
+        if (!task) return;
+        this.updateProgress = {
+          percent: Number(task.percent) || 0,
+          phase: task.phase || "downloading",
+          received: Number(task.received) || 0,
+          total: Number(task.total) || 0,
+        };
+        const pct = this.updateProgress.percent;
+        if (task.phase === "downloading") {
+          this.updateInstallDetail = this.t("settings.update.installingDownload") + " " + pct + "%";
+        } else if (task.phase === "verifying") {
+          this.updateInstallDetail = this.t("settings.update.verifying");
+        } else if (task.phase === "installing" || task.phase === "restarting") {
+          this.updateInstallDetail = this.t("settings.update.installingWait");
+        }
+      },
+      pollUpdateProgress: function (targetVersion) {
+        const self = this;
+        let misses = 0;
+        const tick = async function () {
+          // 面板被卸载/重启期间接口会连续失败若干次，这是升级的正常过程，
+          // 不能一失败就当出错 —— 只要它还会回来，就继续等。
+          try {
+            const r = await window.EMU_API.updateProgress();
+            misses = 0;
+            self.applyUpdateTask(r && r.task);
+            const task = (r && r.task) || {};
+            if (task.phase === "error") {
+              self.updateInstalling = false;
+              self.updateError = self.t("settings.update.installFailed",
+                { v: task.error || "" });
+              return;
+            }
+            // 新版本已上线：面板报告的版本号已经不再是安装前那个版本了。
+            // 用"和起始版本不同"判断，比依赖精确匹配目标版本号更耐得住
+            // Release 里 tag 带前缀、或资产名与版本号不完全一致的情况。
+            if (r && r.version && self._updateFromVersion &&
+                r.version !== self._updateFromVersion) {
+              self.finishUpdate(r.version);
+              return;
+            }
+          } catch (e) {
+            misses += 1;
+            // 面板可能正在被替换，期间连不上是正常的；超时太久才报错
+            if (misses > 180) {
+              self.updateInstalling = false;
+              self.updateError = self.t("settings.update.installFailed",
+                { v: self.t("settings.update.timeout") });
+              return;
+            }
+          }
+          setTimeout(tick, 1000);
+        };
+        setTimeout(tick, 800);
+      },
+      /* 新版本装好了：进度拉满、给个提示，然后整体重新加载页面。
+         面板在升级过程中被卸载重装，前端的内存状态（版本号、设置、路由）
+         都还是旧的，只刷新数据不够 —— 重载一次让页面跑在新版本上。 */
+      finishUpdate: function (version) {
+        const self = this;
+        this.updateProgress.percent = 100;
+        this.updateInstallDetail = this.t("settings.update.done", { v: version || "" });
+        this.ok("settings.update.done", { v: version || "" });
+        setTimeout(function () {
+          self.updateInstalling = false;
+          // 面板刚从卸载重装里回来，等它把引擎也拉起来
+          self.bootstrapPanel().catch(function () {});
+          setTimeout(function () { location.reload(); }, 1500);
+        }, 1500);
       },
 
       /* ---------------- charts ---------------- */

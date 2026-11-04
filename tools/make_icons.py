@@ -116,12 +116,15 @@ def main():
     print("== 官方 eMule 图标素材：%dx%d（已裁掉透明留白）" % (art.size))
     master = compose(art, S)
     print("== 生成图标 ==")
+    # 外层 ICON.PNG / ICON_256.PNG 是 fnpack 要求的固定名字；
+    # ui/images 里则要按 fnOS 模板的约定用小写 icon_{0}.png ——
+    # ui/config 写成 "images/icon_{0}.png"，应用中心会把 {0} 换成尺寸去取文件，
+    # 文件名大小写或命名方式不符，图标位置就是空的。
     for rel, size in [
         ("ICON_256.PNG", 256),
         ("ICON.PNG", 64),
-        ("app/ui/images/ICON_256.PNG", 256),
-        ("app/ui/images/ICON.PNG", 64),
-        ("app/ui/images/ICON_64.PNG", 64),
+        ("app/ui/images/icon_256.png", 256),
+        ("app/ui/images/icon_64.png", 64),
         ("app/web/images/icon.png", 192),
     ]:
         save(master.resize((size, size), Image.LANCZOS), os.path.join(SRC, rel.replace("/", os.sep)))

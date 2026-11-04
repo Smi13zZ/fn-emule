@@ -1306,7 +1306,19 @@
             </button>
           </div>
           <div class="hint" style="color:var(--danger);margin-top:10px" v-if="updateError">{{ updateError }}</div>
-          <div class="hint" style="margin-top:10px" v-if="updateInstalling">{{ updateInstallDetail }}</div>
+          <!-- 一键更新进度：下载百分比 + 阶段说明，弹窗一直留到新版本上线 -->
+          <div class="updprog" v-if="updateInstalling">
+            <div class="updprog-head">
+              <span>{{ updateInstallDetail }}</span>
+              <div class="spacer"></div>
+              <span class="mono" v-if="updateProgress.phase === 'downloading'">{{ updateProgress.percent }}%</span>
+            </div>
+            <div class="progress"><i :style="{ width: Math.max(2, updateProgress.percent) + '%' }"></i></div>
+            <div class="hint" style="margin-top:6px"
+                 v-if="updateProgress.phase === 'downloading' && updateProgress.total">
+              {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
+            </div>
+          </div>
           <div class="hint ok" style="margin-top:10px" v-if="updateDownloaded">
             {{ t('settings.update.downloadedHint', { n: updateDownloaded.name || '', p: '/var/apps/fn-emule/var/updates' }) }}
           </div>
@@ -1487,6 +1499,32 @@
           </div>
         </div>
       </template>
+    </div>
+  </div>
+</div>
+
+<!-- ================= update progress modal =================
+     升级时面板要被卸载重装，页面必然短暂失联。这个弹窗不能关，
+     一直显示到新版本回来为止，避免用户以为卡住而手动重进。 -->
+<div class="modal-wrap updmodal" v-if="updateInstalling">
+  <div class="modal">
+    <div class="modal-head">
+      <span class="ic" v-html="ic('download')"></span>
+      {{ t('settings.update.installing') }}
+    </div>
+    <div class="modal-body">
+      <div class="updprog">
+        <div class="updprog-head">
+          <span>{{ updateInstallDetail }}</span>
+          <div class="spacer"></div>
+          <span class="mono" v-if="updateProgress.phase === 'downloading'">{{ updateProgress.percent }}%</span>
+        </div>
+        <div class="progress"><i :style="{ width: Math.max(2, updateProgress.percent) + '%' }"></i></div>
+        <div class="hint" style="margin-top:8px"
+             v-if="updateProgress.phase === 'downloading' && updateProgress.total">
+          {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
+        </div>
+      </div>
     </div>
   </div>
 </div>

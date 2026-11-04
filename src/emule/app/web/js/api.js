@@ -169,6 +169,7 @@
     /* ---- update ---- */
     updateCheck: function (force) { return request(BASE + "/update/check" + (force ? "?force=1" : "")); },
     installUpdate: function () { return request(BASE + "/update/install", { method: "POST", body: {} }); },
+    updateProgress: function () { return request(BASE + "/update/progress"); },
   };
 
   window.EMU_API = API;
