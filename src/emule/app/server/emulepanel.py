@@ -439,6 +439,13 @@ class UpdateChecker(object):
         with self._lock:
             self._cache.update({"at": now, "payload": dict(payload)})
         self._remember(payload)
+        # 版本检查成功后推一条通知（同一版本只推一次，见 notify_update_event）
+        runtime = RT
+        if runtime is not None:
+            try:
+                runtime.notify_update_event(payload)
+            except Exception:  # noqa: BLE001 - 推送问题绝不能影响版本检查结果
+                pass
         return payload
 
     def _remember(self, payload):
@@ -490,6 +497,10 @@ class Runtime(object):
         self._notify_state = {}
         self._notify_lock = threading.Lock()
         self._notify_miss = 0
+        # 已推送过「新版本」通知的版本号，持久化在 notify-state.json，
+        # 重启面板后不会把同一个版本再推一遍。
+        self._notify_state_file = os.path.join(store.var_dir, "notify-state.json")
+        self._notify_state_lock = threading.Lock()
         self._sample_miss = 0
 
     # -- 日志 ---------------------------------------------------------------
@@ -855,6 +866,54 @@ class Runtime(object):
                          level="warn")
         return results
 
+    # -- 新版本通知 ---------------------------------------------------------
+    def _load_notify_state(self):
+        try:
+            with open(self._notify_state_file, encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_notify_state(self, state):
+        try:
+            tmp = self._notify_state_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(state, handle, ensure_ascii=False, indent=2)
+            os.replace(tmp, self._notify_state_file)
+        except OSError:
+            pass
+
+    def notify_update_event(self, info):
+        """发现新版本时往通知通道推一条；同一个版本只推一次。
+
+        版本号记在 var/notify-state.json 里，面板重启后不会把同一个版本再推一遍。
+        很多人挂着 NAS 不看面板，等想起来才看到有新版本，这条推送就是给他们用的。
+        """
+        cfg = self.store.section("notify")
+        if not cfg.get("enabled"):
+            return
+        events = cfg.get("events") or {}
+        if not events.get("update", True):
+            return
+        latest = str((info or {}).get("latest") or "").strip()
+        if not latest or not info.get("has_update"):
+            return
+        with self._notify_state_lock:
+            state = self._load_notify_state()
+            if state.get("last_update_notified") == latest:
+                return
+            state["last_update_notified"] = latest
+            self._save_notify_state(state)
+        title = "eMule %s 可用 / Update available" % latest
+        body = ("当前版本 %s，可在面板「设置 → 更新」里一键升级。\n"
+                "Installed %s. Open Settings → Update to upgrade."
+                % (self.version, self.version))
+        try:
+            self.send_channels(title, body, event="update")
+        except Exception as exc:  # noqa: BLE001 - 推送失败不能影响版本检查
+            self.log("发送新版本通知失败：%r" % (exc,), level="warn")
+
     # -- 停机 ---------------------------------------------------------------
     def shutdown(self):
         """幂等停机：信号处理器和 main 的 finally 都会调一次。"""
@@ -1113,6 +1172,8 @@ def normalize_notify_settings(cfg):
         "events": {
             "complete": bool(events.get("complete", True)),
             "error": bool(events.get("error", True)),
+            # 发现新版本时推送：默认开，很多人挂着 NAS 不看面板
+            "update": bool(events.get("update", True)),
         },
         "channels": [notify.channel_public(c) for c in as_list(cfg.get("channels"))
                      if isinstance(c, dict)],
@@ -2633,13 +2694,15 @@ class Handler(BaseHTTPRequestHandler):
             if "enabled" in body:
                 patch["enabled"] = bool(body["enabled"])
             incoming_events = as_dict(body.get("events"))
-            for key in ("complete", "error"):
+            for key in ("complete", "error", "update"):
                 if key in incoming_events:
                     events[key] = bool(incoming_events[key])
             if "on_complete" in body:
                 events["complete"] = bool(body["on_complete"])
             if "on_error" in body:
                 events["error"] = bool(body["on_error"])
+            if "on_update" in body:
+                events["update"] = bool(body["on_update"])
             patch["events"] = events
             RT.store.update({"notify": patch})
             RT.log("通知设置已更新：enabled=%s events=%s" % (patch.get("enabled", cfg.get("enabled")),

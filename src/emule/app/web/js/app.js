@@ -87,7 +87,7 @@
         add_paused: false, ich: true, aich: true, upnp: false, ipfilter: true,
       },
       bootstrap: { server_met_url: "", nodes_dat_url: "", auto_hours: 24, last_update: 0 },
-      notify: { enabled: false, channels: [], events: { complete: true, error: true } },
+      notify: { enabled: false, channels: [], events: { complete: true, error: true, update: true } },
       backup: { auto: false, keep: 7, last: 0 },
       update: { repo: "Smi13zZ/fn-emule", check: true, last: 0, latest: "" },
     };
@@ -1373,7 +1373,8 @@
           merged.engine = Object.assign(base.engine, s.engine || {});
           merged.bootstrap = Object.assign(base.bootstrap, s.bootstrap || {});
           merged.notify = Object.assign(base.notify, s.notify || {});
-          merged.notify.events = Object.assign({ complete: true, error: true }, (s.notify && s.notify.events) || {});
+          merged.notify.events = Object.assign({ complete: true, error: true, update: true },
+            (s.notify && s.notify.events) || {});
           merged.backup = Object.assign(base.backup, s.backup || {});
           merged.update = Object.assign(base.update, s.update || {});
           if (!Array.isArray(merged.engine.shared_dirs)) merged.engine.shared_dirs = [];

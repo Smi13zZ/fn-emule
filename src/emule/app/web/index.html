@@ -1184,13 +1184,22 @@
               <input type="checkbox" :checked="draft.notify.events.complete" @change="saveNotifyEvent('complete', $event.target.checked)">
             </label>
           </div>
-          <div class="swrow last">
+          <div class="swrow">
             <div class="swtext">
               <div class="swname">{{ t('settings.notify.onError') }}</div>
               <div class="hint">{{ t('settings.notify.onErrorHint') }}</div>
             </div>
             <label class="switch">
               <input type="checkbox" :checked="draft.notify.events.error" @change="saveNotifyEvent('error', $event.target.checked)">
+            </label>
+          </div>
+          <div class="swrow last">
+            <div class="swtext">
+              <div class="swname">{{ t('settings.notify.onUpdate') }}</div>
+              <div class="hint">{{ t('settings.notify.onUpdateHint') }}</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" :checked="draft.notify.events.update" @change="saveNotifyEvent('update', $event.target.checked)">
             </label>
           </div>
         </div>

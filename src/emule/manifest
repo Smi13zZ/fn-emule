@@ -1,5 +1,5 @@
 appname               = fn-emule
-version               = 26.11.17
+version               = 26.11.18
 display_name          = eMule
 desc                  = eMule 是运行在飞牛 fnOS 上的 eD2k/Kad 原生下载工具，内置 aMule 2.3.3 引擎，随包自带、不依赖系统包。提供实时速度曲线、下载/上传任务与批量操作、来源与分块详情、eD2k 与 Kad 服务器管理、网络内搜索、共享文件、统计与日志，并内置网络诊断（High/Low ID、Kad 是否受限、端口与防火墙检查），支持深浅主题与中英文切换。所有请求由本机服务转发，aMule 的 EC 端口只监听 127.0.0.1，浏览器侧不接触引擎凭据。
 platform              = all
