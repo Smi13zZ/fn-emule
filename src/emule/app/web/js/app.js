@@ -1683,7 +1683,13 @@
         try {
           const r = await window.EMU_API.updateCheck(!!force);
           this.updateInfo = r || null;
-          if (r && r.error) this.updateError = this.t("settings.update.failed", { v: r.error });
+          if (r && r.error) {
+            this.updateError = this.t("settings.update.failed", { v: r.error });
+          } else if (r && (r.available || r.has_update) && !this._updateNotified) {
+            // 一次会话只弹一次，避免每次轮询都刷同一条提示
+            this._updateNotified = true;
+            this.toast(this.t("settings.update.newToast", { v: r.latest || "" }));
+          }
         } catch (e) {
           this.updateError = this.t("settings.update.failed", { v: (e && e.message) || "" });
         } finally {
