@@ -1315,19 +1315,7 @@
             </button>
           </div>
           <div class="hint" style="color:var(--danger);margin-top:10px" v-if="updateError">{{ updateError }}</div>
-          <!-- 一键更新进度：下载百分比 + 阶段说明，弹窗一直留到新版本上线 -->
-          <div class="updprog" v-if="updateInstalling">
-            <div class="updprog-head">
-              <span>{{ updateInstallDetail }}</span>
-              <div class="spacer"></div>
-              <span class="mono" v-if="updateProgress.phase === 'downloading'">{{ updateProgress.percent }}%</span>
-            </div>
-            <div class="progress"><i :style="{ width: Math.max(2, updateProgress.percent) + '%' }"></i></div>
-            <div class="hint" style="margin-top:6px"
-                 v-if="updateProgress.phase === 'downloading' && updateProgress.total">
-              {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
-            </div>
-          </div>
+          <!-- 进度只在弹窗里显示：卡片再放一份会和遮罩下的弹窗视觉重复 -->
           <div class="hint ok" style="margin-top:10px" v-if="updateDownloaded">
             {{ t('settings.update.downloadedHint', { n: updateDownloaded.name || '', p: '/var/apps/fn-emule/var/updates' }) }}
           </div>
