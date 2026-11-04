@@ -687,9 +687,14 @@ input[type="number"] { -moz-appearance: textfield; }
 .toast.err { border-color: var(--danger); color: var(--danger); }
 @keyframes popin { from { transform: translateY(6px); opacity: 0; } to { transform: none; opacity: 1; } }
 
-.logline { font-family: var(--mono); font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border-soft); display: flex; gap: 12px; }
-.logline .t { color: var(--faint); flex: 0 0 172px; display: inline-flex; align-items: baseline; gap: 10px; white-space: nowrap; }
+/* 行内间距全部走显式 margin，不用 flex 的 gap：
+   gap 只能给同一个值，而这里要的是「日期→时间」和「时间→徽标」都是 10px、
+   「徽标→正文」是 12px，三处不一样。 */
+.logline { font-family: var(--mono); font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border-soft); display: flex; gap: 0; align-items: baseline; }
+.logline .t { color: var(--faint); flex: 0 0 auto; display: inline-flex; align-items: baseline; gap: 10px; white-space: nowrap; }
 .logline .t .d { opacity: .8; }
+/* 徽标必须固定在一行：正文很长时它会跟着被拉宽、折成两行 */
+.logline .lvlbadge { flex: 0 0 auto; white-space: nowrap; margin-left: 10px; margin-right: 12px; }
 .logline.warn .m { color: var(--warn); }
 .logline.err .m { color: var(--danger); }
 
@@ -987,15 +992,16 @@ canvas { display: block; width: 100%; height: 100%; }
      scroll (overflow-wrap:anywhere), the stacked two-line timestamp was
      wasted vertical space. The .d/.h spans stay in the template so the
      desktop fixed-width column layout is untouched. */
-  .logline { flex-direction: row; flex-wrap: wrap; gap: 2px 10px; padding: 8px 0; align-items: baseline; }
-  /* 时间 + 级别徽标同行，消息独占第二行（用户反馈：徽标独占一行太丑） */
+  .logline { flex-direction: row; flex-wrap: wrap; gap: 0; padding: 8px 0; align-items: baseline; }
+  /* 第一行：日期 + 时间 + 级别徽标（徽标固定在时间右边、只有自身宽度，
+     绝不随正文变宽或折行）；第二行：正文独占。 */
   .logline .t {
     flex: 0 0 auto; width: auto;
-    display: inline-flex; align-items: baseline; gap: 6px;
+    display: inline-flex; align-items: baseline; gap: 10px;
     font-size: 11px; order: 1;
   }
-  .logline .lvlbadge { order: 2; }
-  .logline .m { order: 3; flex: 1 1 100%; word-break: break-word; overflow-wrap: anywhere; }
+  .logline .lvlbadge { order: 2; flex: 0 0 auto; white-space: nowrap; margin-left: 10px; margin-right: 0; }
+  .logline .m { order: 3; flex: 1 1 100%; word-break: break-word; overflow-wrap: anywhere; margin-top: 2px; }
   .logline .t .d { color: var(--dim); }
   .logline .t .h { color: var(--faint); }
 

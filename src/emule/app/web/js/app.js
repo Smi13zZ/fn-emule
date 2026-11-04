@@ -68,6 +68,8 @@
 
   const POLL_MS = 2500;
   const LOG_POLL_MS = 5000;
+  /* 与后端 /api/log 的上限（2000）对齐 */
+  const LOG_FETCH_LIMIT = 2000;
   const BACKUP_ROWS = 5;
 
   function clone(o) {
@@ -1327,7 +1329,9 @@
         if (this.logsLoading) return;
         this.logsLoading = true;
         try {
-          const d = await window.EMU_API.logs(200);
+          // 取后端允许的上限，而不是固定 200：更早的记录本来就在服务端，
+          // 拿得回来却只请求 200 条，等于人为把历史截断。
+          const d = await window.EMU_API.logs(LOG_FETCH_LIMIT);
           const items = (d && d.items) || (Array.isArray(d) ? d : []);
           this.logs = items.map(function (l) {
             return {
@@ -1652,6 +1656,12 @@
       },
 
       /* ---------------- update ---------------- */
+      /* 发布仓库名，取自设置里的 update.repo；拿不到就退回默认值 */
+      updateRepoLabel: function () {
+        const fromInfo = this.updateInfo && this.updateInfo.repo;
+        const fromCfg = this.draft && this.draft.update && this.draft.update.repo;
+        return fromInfo || fromCfg || "Smi13zZ/fn-emule";
+      },
       checkUpdate: async function (force) {
         if (this.updateChecking) return;
         this.updateChecking = true;

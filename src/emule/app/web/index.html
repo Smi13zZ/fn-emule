@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
-<title>eMule 电驴</title>
+<title>eMule</title>
 <link rel="icon" href="./images/icon.svg">
 <link rel="stylesheet" href="./style.css?v=26.11.0">
 </head>
@@ -1250,11 +1250,16 @@
         <!-- ---------- update ---------- -->
         <div class="card" v-if="settingsTab === 'update'">
           <div class="card-head">
-            <h3>{{ t('settings.tab.update') }}</h3>
+            <div style="min-width:0">
+              <h3>{{ t('settings.update.title') }}</h3>
+              <div class="hint" style="margin-top:2px">{{ t('settings.update.desc') }}</div>
+            </div>
             <div class="spacer"></div>
             <a class="btn sm" v-if="updateInfo && updateInfo.url" :href="updateInfo.url"
                target="_blank" rel="noopener noreferrer">{{ t('settings.update.release') }}</a>
           </div>
+
+          <!-- current -> latest -->
           <div class="vhero">
             <div class="vcol">
               <div class="vk">{{ t('settings.update.current') }}</div>
@@ -1266,31 +1271,44 @@
               <div class="vv" :class="{ fresh: updateNew }">{{ updateInfo && updateInfo.latest ? 'v' + updateInfo.latest : '—' }}</div>
             </div>
           </div>
+
+          <!-- status strip -->
           <div class="vstatus" :class="updateNew ? 'has' : 'idle'">
             <span class="vsic" v-html="ic('spark')"></span>
             <div class="vstext">
-              <b>{{ updateNew ? t('settings.update.available', { v: updateInfo.latest })
+              <b>{{ updateNew ? t('settings.update.newTitle')
                     : (updateInfo && updateInfo.state === 'no_release' ? t('settings.update.noRelease')
-                       : (updateInfo ? t('settings.update.upToDate') : t('settings.update.notChecked'))) }}</b>
-              <span>{{ updateInfo && updateInfo.notes ? updateInfo.notes.split('\n')[0] : t('settings.update.hint') }}</span>
+                       : (updateInfo && updateInfo.ok ? t('settings.update.upTitle') : t('settings.update.notChecked'))) }}</b>
+              <span>{{ updateNew ? t('settings.update.newSub') : t('settings.update.upSub') }}</span>
             </div>
             <div class="spacer"></div>
-            <button class="btn sm" :disabled="updateChecking || updateInstalling" @click="checkUpdate(true)">
-              <span class="ic" v-html="ic('refresh')"></span>
-              {{ updateChecking ? t('settings.update.checking') : t('settings.update.check') }}
+            <button class="btn sm" type="button" :disabled="updateChecking || updateInstalling" @click="checkUpdate(true)">
+              <span class="ic" v-html="ic('refresh')"></span>{{ updateChecking ? t('settings.update.checking') : t('settings.update.check') }}
             </button>
-            <button class="btn sm primary" v-if="updateNew" :disabled="updateInstalling" @click="askInstallUpdate">
-              {{ updateInstalling ? t('settings.update.installing') : t('settings.update.install') }}
+            <button class="btn sm primary" type="button" v-if="updateNew" :disabled="updateInstalling" @click="askInstallUpdate">
+              <span class="ic" v-html="ic('download')"></span>{{ updateInstalling ? t('settings.update.installing') : t('settings.update.install') }}
             </button>
           </div>
-          <div class="hint err" style="margin-top:10px" v-if="updateError">{{ updateError }}</div>
+          <div class="hint" style="color:var(--danger);margin-top:10px" v-if="updateError">{{ updateError }}</div>
+          <div class="hint" style="margin-top:10px" v-if="updateInstalling">{{ updateInstallDetail }}</div>
           <div class="hint ok" style="margin-top:10px" v-if="updateDownloaded">
             {{ t('settings.update.downloadedHint', { n: updateDownloaded.name || '', p: '/var/apps/fn-emule/var/updates' }) }}
           </div>
+
           <div class="sep"></div>
           <h3>{{ t('settings.update.notes') }}</h3>
           <div class="relnotes" v-if="updateInfo && updateInfo.notes">{{ updateInfo.notes }}</div>
           <div class="faint" v-else>{{ t('settings.update.noNotes') }}</div>
+
+          <dl class="kv" style="margin-top:14px">
+            <dt>{{ t('settings.update.repo') }}</dt>
+            <dd class="mono">{{ updateRepoLabel() }}</dd>
+            <dt>{{ t('settings.update.checkedAt') }}</dt>
+            <dd>{{ updateInfo && updateInfo.checked_at ? fmt.fmtDate(updateInfo.checked_at) : t('settings.update.notChecked') }}</dd>
+            <dt>{{ t('settings.update.publishedAt') }}</dt>
+            <dd>{{ updateInfo && updateInfo.published_at ? updateInfo.published_at.slice(0, 10) : '—' }}</dd>
+          </dl>
+          <div class="hint" style="margin-top:12px">{{ t('settings.update.hint') }}</div>
         </div>
 
         <!-- ---------- about ---------- -->

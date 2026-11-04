@@ -2411,10 +2411,15 @@ class Handler(BaseHTTPRequestHandler):
             self.require_method(method, "GET")
             limit = int_or((query.get("limit") or ["200"])[0], 200)
             limit = max(1, min(2000, limit))
+            # 引擎日志量远大于面板日志（aMule 的 UPnP 心跳几分钟就能刷满几百行），
+            # 两边各取 limit 条再合并、最后统一截断，面板日志会被整段挤掉，
+            # 用户在日志页根本看不到面板自己的记录。所以两边各留一半配额，
+            # 合并后再按时间取最近的 limit 条。
+            each = max(1, limit // 2)
             engine_lines = []
             if RT.service is not None:
                 try:
-                    engine_lines = [line for line in as_list(RT.call("logs", limit, timeout=6.0))
+                    engine_lines = [line for line in as_list(RT.call("logs", each, timeout=6.0))
                                     if isinstance(line, dict)]
                 except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing):
                     engine_lines = []
@@ -2423,7 +2428,8 @@ class Handler(BaseHTTPRequestHandler):
                 merged.append({"t": int_or(line.get("t")),
                                "level": str(line.get("level") or "info"),
                                "text": str(line.get("text") or ""), "source": "engine"})
-            for line in RT.store.read_log(limit):
+            panel_lines = RT.store.read_log(limit - len(merged) if len(merged) < limit else each)
+            for line in panel_lines:
                 merged.append({"t": int_or(line.get("t")),
                                "level": str(line.get("level") or "info"),
                                "text": str(line.get("text") or ""), "source": "panel"})
