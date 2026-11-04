@@ -1651,15 +1651,6 @@
   </div>
 </div>
 
-<!-- ================= one-click update overlay ================= -->
-<div class="upoverlay" v-if="updateInstalling">
-  <div class="upoverlay-box">
-    <span class="upspin" v-html="ic('refresh')"></span>
-    <div class="uptitle">{{ t('settings.update.installing') }}</div>
-    <div class="dim">{{ updateInstallDetail || t('settings.update.hint') }}</div>
-  </div>
-</div>
-
 <div class="toasts">
   <div v-for="tt in toasts" :key="tt.id" class="toast" :class="tt.kind">{{ tt.text }}</div>
 </div>

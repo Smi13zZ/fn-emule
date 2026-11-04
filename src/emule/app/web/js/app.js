@@ -1732,8 +1732,12 @@
       },
       applyUpdateTask: function (task) {
         if (!task) return;
+        const prev = this.updateProgress || {};
+        const nextPct = Number(task.percent) || 0;
         this.updateProgress = {
-          percent: Number(task.percent) || 0,
+          // 服务端进度是瞬时快照，网速快时两次轮询之间能差几十个百分点。
+          // 显示值只增不减，避免进度条回头跳。
+          percent: Math.max(Number(prev.percent) || 0, nextPct),
           phase: task.phase || "downloading",
           received: Number(task.received) || 0,
           total: Number(task.total) || 0,
@@ -1782,9 +1786,11 @@
               return;
             }
           }
-          setTimeout(tick, 1000);
+          // 轮询间隔要约 200ms：更新包通常几 MB，在千兆内网不到 1 秒就下完，
+          // 1 秒一次只能抓到一两个中间值，看起来像"11% 直接跳到完成"。
+          setTimeout(tick, 200);
         };
-        setTimeout(tick, 800);
+        setTimeout(tick, 200);
       },
       /* 新版本装好了：进度拉满、给个提示，然后整体重新加载页面。
          面板在升级过程中被卸载重装，前端的内存状态（版本号、设置、路由）
