@@ -1503,25 +1503,15 @@
 <!-- ================= update progress modal =================
      升级时面板要被卸载重装，页面必然短暂失联。这个弹窗不能关，
      一直显示到新版本回来为止，避免用户以为卡住而手动重进。 -->
-<div class="modal-wrap updmodal" v-if="updateInstalling">
-  <div class="modal">
-    <div class="modal-head">
-      <span class="ic" v-html="ic('download')"></span>
-      {{ t('settings.update.installing') }}
-    </div>
-    <div class="modal-body">
-      <div class="updprog">
-        <div class="updprog-head">
-          <span>{{ updateInstallDetail }}</span>
-          <div class="spacer"></div>
-          <span class="mono" v-if="updateProgress.phase === 'downloading'">{{ updateProgress.percent }}%</span>
-        </div>
-        <div class="progress"><i :style="{ width: Math.max(2, updateProgress.percent) + '%' }"></i></div>
-        <div class="hint" style="margin-top:8px"
-             v-if="updateProgress.phase === 'downloading' && updateProgress.total">
-          {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
-        </div>
-      </div>
+<div class="upoverlay" v-if="updateInstalling">
+  <div class="upoverlay-box">
+    <span class="upspin" v-html="ic('refresh')"></span>
+    <div class="uptitle">{{ t('settings.update.installing') }}</div>
+    <div class="upstage">{{ updateInstallDetail || t('settings.update.hint') }}</div>
+    <div class="progress upbar"><i :style="{ width: Math.max(2, updateProgress.percent) + '%' }"></i></div>
+    <div class="upmeta" v-if="updateProgress.phase === 'downloading' && updateProgress.total">
+      {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
+      <span class="uppct">{{ updateProgress.percent }}%</span>
     </div>
   </div>
 </div>

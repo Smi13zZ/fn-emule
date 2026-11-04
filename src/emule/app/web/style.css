@@ -662,6 +662,28 @@ input[type="number"] { -moz-appearance: textfield; }
   word-break: break-word; margin-top: 2px;
 }
 
+/* ---------------- one-click update overlay ---------------- */
+/* 居中卡片 + 旋转图标；进度条放在阶段说明下面，跟着下载走。 */
+.upoverlay {
+  position: fixed; inset: 0; z-index: 95; padding: 20px;
+  background: rgba(0, 0, 0, .5); display: grid; place-items: center;
+}
+.upoverlay-box {
+  width: min(400px, 100%); padding: 26px 22px; text-align: center;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-pop);
+}
+.upspin { display: inline-flex; color: var(--text); }
+.upspin svg { animation: spin360 1s linear infinite; }
+.uptitle { font-size: 15px; font-weight: 600; margin: 12px 0 6px; }
+.upstage { font-size: 12.5px; color: var(--dim); overflow-wrap: anywhere; }
+.upbar { margin-top: 14px; height: 6px; }
+.upmeta {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin-top: 8px; font-size: 12px; color: var(--faint);
+}
+.upmeta .uppct { color: var(--text); font-weight: 500; }
+
 /* ---------------- toasts / log ---------------- */
 .toasts { position: fixed; right: 16px; bottom: 16px; z-index: 90; display: flex; flex-direction: column; gap: 8px; }
 .toast {
@@ -1191,13 +1213,3 @@ canvas { display: block; width: 100%; height: 100%; }
 }
 
 .settings-engine-bar .chip .dot { margin-right: 6px; }
-
-/* ---------- 一键更新进度（下载百分比） ---------- */
-.updprog { margin-top: 12px; }
-/* 更新进度弹窗：不可点遮罩关闭，避免误关后看不到进度 */
-.updmodal { cursor: default; }
-.updmodal .modal-head { display: flex; align-items: center; gap: 8px; }
-.updmodal .modal-head .ic { width: 18px; height: 18px; display: flex; color: var(--accent-bar); }
-.updprog-head { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--dim); }
-.updprog-head .mono { font-size: 12.5px; color: var(--text); }
-.updprog .progress { margin-top: 8px; }
