@@ -1508,16 +1508,25 @@
     <span class="upspin" v-html="ic('refresh')"></span>
     <div class="uptitle">{{ updateTargetVersion ? t('settings.update.installingTitle', { v: updateTargetVersion }) : t('settings.update.installing') }}</div>
     <div class="upstage">{{ updateInstallDetail || t('settings.update.hint') }}</div>
-    <div class="progress upbar"><i :style="{ width: Math.max(2, updateProgress.percent) + '%' }"></i></div>
-    <!-- 这一行必须常驻：下载完进入校验/安装阶段时若把它 v-if 掉，
-         弹窗会突然变矮，看起来像"卡了一下"。所以固定留位，只换内容。 -->
-    <div class="upmeta">
-      <template v-if="updateProgress.total">
-        {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
+
+    <!-- 进度区：两种形态占同一块空间（高度固定），弹窗不会因为切阶段变形。
+         下载阶段有真实字节数 → 进度条 + 百分比 + 已下载/总量；
+         其余阶段没有可测总量 → 不显示进度条，只把"准备中…"放在这块空间正中间。 -->
+    <div class="upprog-block">
+      <template v-if="updateProgressKnown">
+        <div class="upprog">
+          <div class="upprog-fill" :style="{ width: updateProgressPct + '%' }"></div>
+        </div>
+        <div class="upprog-meta">
+          <span>{{ updateProgressPct }}%</span>
+          <span v-if="updateProgress.total">
+            {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
+          </span>
+        </div>
       </template>
-      <template v-else>&nbsp;</template>
-      <span class="uppct">{{ updateProgress.percent }}%</span>
+      <div class="upprog-ready" v-else>{{ t('settings.update.progressUnknown') }}</div>
     </div>
+
     <div class="upkeep">{{ t('settings.update.keepOpen') }}</div>
   </div>
 </div>

@@ -688,16 +688,38 @@ input[type="number"] { -moz-appearance: textfield; }
      预留两行高度，避免切换阶段时整块上下跳。 */
   min-height: 34px; line-height: 17px;
 }
-/* align-items:center 会让子项按内容宽度收缩，进度条必须显式拉满，
-   否则宽度塌成 0，看起来就是"进度条不见了"。 */
-.upbar { margin-top: 14px; height: 6px; width: 100%; flex: 0 0 auto; align-self: stretch; }
-.upmeta {
-  display: flex; align-items: center; justify-content: center; gap: 8px;
-  margin-top: 8px; font-size: 12px; color: var(--faint);
-  /* 文案为空时也要撑住这一行 */
-  min-height: 17px;
+/* 进度区：两种形态共用同一块固定高度的空间，
+   所以从"下载中"切到"准备中"时弹窗不会变高变矮。 */
+.upprog-block {
+  width: 100%; align-self: stretch;
+  /* 6px 条 + 7px 间距 + 17px 文字行 = 30px，固定住 */
+  height: 30px; margin-top: 14px;
+  display: flex; flex-direction: column; justify-content: flex-start;
 }
-.upmeta .uppct { color: var(--text); font-weight: 500; }
+/* 进度条显式拉满：align-items:center 会让子项按内容宽度收缩，
+   不写宽度就会塌成 0，看起来像"进度条不见了"。 */
+.upprog {
+  position: relative; height: 6px; width: 100%;
+  border-radius: 999px; background: var(--muted); overflow: hidden;
+  flex: 0 0 auto;
+}
+.upprog-fill {
+  height: 100%; width: 0; border-radius: 999px;
+  background: var(--primary); transition: width .25s ease;
+}
+.upprog-meta {
+  /* 居中而不是两端对齐：百分比和已下载/总量放一起居中显示 */
+  display: flex; justify-content: center; align-items: baseline; gap: 10px;
+  margin-top: 7px; font-size: 11.5px; color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  width: 100%; min-height: 17px;
+}
+/* 准备中：没有进度条，文字在整块 30px 空间里上下正中 */
+.upprog-ready {
+  flex: 1 1 auto;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11.5px; color: var(--faint);
+}
 .upkeep {
   margin-top: 10px; font-size: 11.5px; color: var(--faint);
   /* 固定占位：失败时这行会换文案，避免弹窗高度跳 */
