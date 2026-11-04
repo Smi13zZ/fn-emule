@@ -83,6 +83,10 @@ eMule 电驴把 **aMule**（eMule 在 Linux 上的官方同源实现）做成了
 |---|---|
 | ![深色](docs/images/dark.png) | <img src="docs/images/mobile.png" width="240"> |
 
+| 添加任务（可勾选「添加后暂停」） | 删除任务（可选是否删掉已下载数据） |
+|---|---|
+| ![添加任务](docs/screenshots/add-task.png) | ![删除任务](docs/screenshots/delete-task.png) |
+
 ---
 
 ## 安装
