@@ -210,6 +210,8 @@
         updateInstalling: false,
         updateError: "",
         updateInstallDetail: "",
+        /* 全局更新提示条：发现新版本后在每个页面顶部提示，关掉后本次会话不再出现 */
+        updateBanner: true,
         installTimer: null,
 
         addOpen: false,
@@ -1389,20 +1391,22 @@
           this.fail("settings.loadFailed", e);
         }
       },
+      /* 主题 / 语言这类即时生效的偏好，切换后静默落盘。
+         调用方各自会弹自己的提示（"已切换到夜间模式""界面语言已切换"），
+         这里再弹一条"设置已保存"就是同一动作两条提示。 */
       persistDraft: async function () {
         try {
           this.settingsSaving = true;
           await window.EMU_API.saveSettings(this.draft);
           this.settings = clone(this.draft);
           this.saved = clone(this.draft);
-          this.ok("settings.saved");
           this.applyTheme();
         } catch (e) {
           this.fail("settings.saveFailed", e);
         } finally {
           this.settingsSaving = false;
-        this.coreWorking = false;
-        this.engineBarNote = "";
+          this.coreWorking = false;
+          this.engineBarNote = "";
         }
       },
       saveSettingsDraft: async function () {
@@ -1656,6 +1660,14 @@
       },
 
       /* ---------------- update ---------------- */
+      /* 跳到设置页的更新分区（全局提示条的"查看详情"） */
+      openUpdateSection: function () {
+        this.goSettingsTab("update");
+      },
+      /* 关掉全局更新提示条：只在本次会话生效，重新打开面板会再提示 */
+      dismissUpdateBanner: function () {
+        this.updateBanner = false;
+      },
       /* 发布仓库名，取自设置里的 update.repo；拿不到就退回默认值 */
       updateRepoLabel: function () {
         const fromInfo = this.updateInfo && this.updateInfo.repo;

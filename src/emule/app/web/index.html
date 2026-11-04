@@ -79,6 +79,22 @@
 
     <div class="content">
 
+      <!-- ---------- new release banner: shows on every view until dismissed ---------- -->
+      <div class="upbanner" v-if="updateNew && updateBanner">
+        <span class="upbanner-ic" v-html="ic('spark')"></span>
+        <div class="upbanner-text">
+          <b>{{ t('settings.update.bannerTitle', { latest: updateInfo.latest, current: appVersion }) }}</b>
+          <span>{{ t('settings.update.bannerSub') }}</span>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn sm upbanner-btn" type="button" @click="openUpdateSection">{{ t('settings.update.bannerDetail') }}</button>
+        <button class="btn sm primary" type="button" @click="askInstallUpdate">{{ t('settings.update.install') }}</button>
+        <button class="icon-btn ghost upbanner-x" type="button" :title="t('settings.update.dismiss')"
+                :aria-label="t('settings.update.dismiss')" @click="dismissUpdateBanner">
+          <span v-html="ic('close')"></span>
+        </button>
+      </div>
+
       <!-- ---------- engine offline / EC down banner ---------- -->
       <div class="engbar" v-if="engineDown || ecDown">
         <span class="ic" v-html="ic('plug')"></span>
