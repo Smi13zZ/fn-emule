@@ -1509,8 +1509,13 @@
     <div class="uptitle">{{ t('settings.update.installing') }}</div>
     <div class="upstage">{{ updateInstallDetail || t('settings.update.hint') }}</div>
     <div class="progress upbar"><i :style="{ width: Math.max(2, updateProgress.percent) + '%' }"></i></div>
-    <div class="upmeta" v-if="updateProgress.phase === 'downloading' && updateProgress.total">
-      {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
+    <!-- 这一行必须常驻：下载完进入校验/安装阶段时若把它 v-if 掉，
+         弹窗会突然变矮，看起来像"卡了一下"。所以固定留位，只换内容。 -->
+    <div class="upmeta">
+      <template v-if="updateProgress.total">
+        {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
+      </template>
+      <template v-else>&nbsp;</template>
       <span class="uppct">{{ updateProgress.percent }}%</span>
     </div>
   </div>

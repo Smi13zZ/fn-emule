@@ -669,18 +669,29 @@ input[type="number"] { -moz-appearance: textfield; }
   background: rgba(0, 0, 0, .5); display: grid; place-items: center;
 }
 .upoverlay-box {
-  width: min(400px, 100%); padding: 26px 22px; text-align: center;
+  /* 固定宽度：内容（阶段文字、大小、百分比）在各阶段长短不同，
+     用 min() 让宽度跟随内容会让弹窗忽大忽小。 */
+  width: min(400px, 100%); min-height: 208px;
+  padding: 26px 22px; text-align: center;
+  display: flex; flex-direction: column; justify-content: center;
   background: var(--bg); border: 1px solid var(--border);
   border-radius: var(--radius-lg); box-shadow: var(--shadow-pop);
 }
 .upspin { display: inline-flex; color: var(--text); }
 .upspin svg { animation: spin360 1s linear infinite; }
 .uptitle { font-size: 15px; font-weight: 600; margin: 12px 0 6px; }
-.upstage { font-size: 12.5px; color: var(--dim); overflow-wrap: anywhere; }
+.upstage {
+  font-size: 12.5px; color: var(--dim); overflow-wrap: anywhere;
+  /* 阶段文字换行数不同（"正在校验安装包…" vs "下载完成，等待 fnOS…"），
+     预留两行高度，避免切换阶段时整块上下跳。 */
+  min-height: 34px; line-height: 17px;
+}
 .upbar { margin-top: 14px; height: 6px; }
 .upmeta {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   margin-top: 8px; font-size: 12px; color: var(--faint);
+  /* 文案为空时也要撑住这一行 */
+  min-height: 17px;
 }
 .upmeta .uppct { color: var(--text); font-weight: 500; }
 
