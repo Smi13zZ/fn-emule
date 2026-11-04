@@ -214,6 +214,8 @@
         updateBanner: true,
         /* 一键更新的下载进度（后台任务轮询回来的） */
         updateProgress: { percent: 0, phase: "idle", received: 0, total: 0 },
+        /* 正在更新到的目标版本号，用于弹窗标题 */
+        updateTargetVersion: "",
         installTimer: null,
 
         addOpen: false,
@@ -1699,7 +1701,7 @@
         const self = this;
         const v = (this.updateInfo && this.updateInfo.latest) || "";
         this.confirmBox = {
-          title: this.t("settings.update.install"),
+          title: this.t("settings.update.installingTitle", { v: v }),
           text: this.t("settings.update.confirm", { v: v }),
           okText: this.t("settings.update.install"),
           onOk: async function () {
@@ -1717,6 +1719,7 @@
         this.updateDownloaded = null;
         this.updateProgress = { percent: 0, phase: "downloading", received: 0, total: 0 };
         this.updateInstallDetail = this.t("settings.update.installingDownload");
+        this.updateTargetVersion = (this.updateInfo && this.updateInfo.latest) || "";
         this._updateFromVersion = this.appVersion;
         try {
           const r = await window.EMU_API.installUpdate();
@@ -1741,11 +1744,14 @@
           total: Number(task.total) || 0,
         };
         const pct = this.updateProgress.percent;
+        /* 四个阶段的文案与 qbpanel 对齐 */
         if (task.phase === "downloading") {
-          this.updateInstallDetail = this.t("settings.update.installingDownload") + " " + pct + "%";
+          this.updateInstallDetail = this.t("settings.update.installingDownload");
         } else if (task.phase === "verifying") {
           this.updateInstallDetail = this.t("settings.update.verifying");
-        } else if (task.phase === "installing" || task.phase === "restarting") {
+        } else if (task.phase === "installing") {
+          this.updateInstallDetail = this.t("settings.update.installingReady");
+        } else if (task.phase === "restarting") {
           this.updateInstallDetail = this.t("settings.update.installingWait");
         }
       },

@@ -1506,7 +1506,7 @@
 <div class="upoverlay" v-if="updateInstalling">
   <div class="upoverlay-box">
     <span class="upspin" v-html="ic('refresh')"></span>
-    <div class="uptitle">{{ t('settings.update.installing') }}</div>
+    <div class="uptitle">{{ updateTargetVersion ? t('settings.update.installingTitle', { v: updateTargetVersion }) : t('settings.update.installing') }}</div>
     <div class="upstage">{{ updateInstallDetail || t('settings.update.hint') }}</div>
     <div class="progress upbar"><i :style="{ width: Math.max(2, updateProgress.percent) + '%' }"></i></div>
     <!-- 这一行必须常驻：下载完进入校验/安装阶段时若把它 v-if 掉，
@@ -1518,6 +1518,7 @@
       <template v-else>&nbsp;</template>
       <span class="uppct">{{ updateProgress.percent }}%</span>
     </div>
+    <div class="upkeep">{{ t('settings.update.keepOpen') }}</div>
   </div>
 </div>
 
