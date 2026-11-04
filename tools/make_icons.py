@@ -118,15 +118,20 @@ def main():
     print("== 生成图标 ==")
     # 外层 ICON.PNG / ICON_256.PNG 是 fnpack 要求的固定名字；
     # ui/images 里则要按 fnOS 模板的约定用小写 icon_{0}.png ——
-    # ui/config 写成 "images/icon_{0}.png"，应用中心会把 {0} 换成尺寸去取文件，
-    # 文件名大小写或命名方式不符，图标位置就是空的。
-    for rel, size in [
+    # ui/config 写成 "images/icon_{0}.png"，应用中心把 {0} 换成实际需要的尺寸去取文件。
+    #
+    # 必须把整套尺寸都生成出来：应用中心在不同设备/设备密度下会请求不同尺寸
+    # （实测系统应用提供了 16/24/48/64/72/96/128/256/512 九档），
+    # 只给 64 和 256 的话，手机端请求 72/96/128 时找不到文件，图标位置就是空白。
+    ui_sizes = [16, 24, 48, 64, 72, 96, 128, 256, 512]
+    plan = [
         ("ICON_256.PNG", 256),
         ("ICON.PNG", 64),
-        ("app/ui/images/icon_256.png", 256),
-        ("app/ui/images/icon_64.png", 64),
         ("app/web/images/icon.png", 192),
-    ]:
+    ] + [("app/ui/images/icon_%d.png" % s, s) for s in ui_sizes]
+    # icon_{0}.png 原样保留一份，兼容把占位符当字面量的实现
+    plan.append(("app/ui/images/icon_{0}.png", 512))
+    for rel, size in plan:
         save(master.resize((size, size), Image.LANCZOS), os.path.join(SRC, rel.replace("/", os.sep)))
     svg = build_svg(None)
     p = os.path.join(SRC, "app", "web", "images", "icon.svg")
