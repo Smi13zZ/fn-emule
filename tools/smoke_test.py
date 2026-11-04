@@ -176,17 +176,21 @@ def main():
 
     check("暂停任务", f_action)
 
-    def f_cancel():
+    def f_delete():
         if not added.get("hash"):
             raise RuntimeError("没有 hash")
-        c.json("/api/transfers/%s/action" % added["hash"], "POST", {"action": "cancel"})
+        r = c.json("/api/transfers/%s/action" % added["hash"], "POST",
+                   {"action": "delete", "delete_data": True})
+        need(r, "results")
+        if not (r.get("results") or [{}])[0].get("ok"):
+            raise RuntimeError("删除失败：%s" % ((r.get("results") or [{}])[0].get("error"),))
         time.sleep(1.0)
         d = c.json("/api/transfers?type=download")
         if [i for i in d.get("items", []) if (i.get("hash") or "").upper() == added["hash"].upper()]:
-            raise RuntimeError("取消后任务还在列表里")
-        return "cleaned"
+            raise RuntimeError("删除后任务还在列表里")
+        return "deleted ok"
 
-    check("取消任务(清理)", f_cancel, required=False)
+    check("删除任务(清理)", f_delete, required=False)
 
     def f_search():
         d = c.json("/api/search/start", "POST", {"q": "debian", "kind": "server", "method": "name"})

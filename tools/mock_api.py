@@ -166,6 +166,26 @@ def overview():
     }
 
 
+def _apply_delete(hashes, delete_data):
+    """删除任务：模拟 CONTRACT Â§3.2 的返回形状（results[].kept）。"""
+    results = []
+    ok_all = True
+    for h in hashes:
+        hit = None
+        for d in STATE["downloads"]:
+            if d["hash"] == h:
+                hit = d
+                break
+        if hit is None:
+            ok_all = False
+            results.append({"hash": h, "ok": False, "error": "下载列表里没有该文件", "kept": ""})
+            continue
+        STATE["downloads"].remove(hit)
+        kept = "" if delete_data else "/var/apps/fn-emule/var/deleted/%s" % h
+        results.append({"hash": h, "ok": True, "error": "", "kept": kept})
+    return {"ok": ok_all, "action": "delete", "count": len(results), "results": results}
+
+
 def transfers(kind):
     items = STATE["downloads"] if kind == "download" else STATE["uploads"]
     with LOCK:
@@ -261,6 +281,10 @@ class Handler(BaseHTTPRequestHandler):
                                 d["status"] = "downloading"; d["speed"] = 120_000
                             elif act == "priority":
                                 d["priority"] = body.get("priority", d["priority"])
+                    if act == "delete":
+                        return self._json(_apply_delete([h], bool(body.get("delete_data"))))
+                    if act == "cancel":
+                        return self._json(_apply_delete([h], True))
                     return self._json({"ok": True})
                 if len(parts) >= 4 and parts[3] == "curl":
                     return self._json({"ok": True})
@@ -277,15 +301,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "added": added})
             if path == "/api/transfers/apply":
                 body = self._read_json()
+                act = body.get("action")
+                hashes = [str(h).upper() for h in (body.get("hashes") or [])]
+                if act in ("delete", "cancel"):
+                    return self._json(_apply_delete(hashes, act == "cancel" or bool(body.get("delete_data"))))
                 for d in STATE["downloads"]:
-                    if d["hash"] in (body.get("hashes") or []):
-                        act = body.get("action")
+                    if d["hash"] in hashes:
                         if act == "pause":
                             d["status"] = "paused"; d["speed"] = 0
                         elif act == "resume":
                             d["status"] = "downloading"; d["speed"] = 90_000
-                        elif act == "cancel":
-                            STATE["downloads"].remove(d)
                 return self._json({"ok": True})
             if path == "/api/servers":
                 cur = STATE["servers"][0]

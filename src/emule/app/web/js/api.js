@@ -86,8 +86,16 @@
       if (priority) body.priority = priority;
       return request(BASE + "/transfers/" + encodeURIComponent(hash) + "/action", { method: "POST", body: body });
     },
-    transferApply: function (hashes, action) {
-      return request(BASE + "/transfers/apply", { method: "POST", body: { hashes: hashes, action: action } });
+    transferApply: function (hashes, action, deleteData) {
+      const body = { hashes: hashes, action: action };
+      // action "delete" only: keep the temp data on disk unless asked otherwise
+      if (action === "delete") body.delete_data = !!deleteData;
+      return request(BASE + "/transfers/apply", { method: "POST", body: body });
+    },
+    /* Deleting a transfer always goes through the batch endpoint - a single row
+       passes a one-element array, so there is only one code path to keep in sync. */
+    transferDelete: function (hashes, deleteData) {
+      return this.transferApply(hashes, "delete", !!deleteData);
     },
     addLinks: function (links, category, paused) {
       return request(BASE + "/transfers/add", {

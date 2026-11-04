@@ -480,6 +480,17 @@
       updateNew: function () {
         return !!(this.updateInfo && (this.updateInfo.available || this.updateInfo.has_update));
       },
+      /* 有没有可测的总字节数：下载阶段有，安装/等待重启阶段没有 */
+      updateProgressKnown: function () {
+        return this.updateProgress.total > 0;
+      },
+      /* 已下载字节占总量的百分比，落到 0..100 的整数 */
+      updateProgressPct: function () {
+        const total = this.updateProgress.total;
+        if (!total) return 0;
+        const raw = (this.updateProgress.received / total) * 100;
+        return Math.round(Math.max(0, Math.min(100, raw)));
+      },
       chunkCells: function () {
         const cs = (this.detailData && this.detailData.chunks) || [];
         if (!cs.length) return [];
@@ -913,28 +924,47 @@
           this.fail("err.opFailed", e);
         }
       },
-      askCancel: function (list) {
+
+      /* Deleting a transfer is not the same thing as cancelling it: the .part
+         data can stay on disk so the same eD2k link picks up where it left off.
+         The checkbox in the confirm box is therefore opt-in (unchecked = keep). */
+      askDelete: function (list) {
         if (!list || !list.length) return;
         const self = this;
         this.confirmBox = {
-          title: this.t("confirm.cancelTask"),
+          title: this.t("delete.title"),
           text: list.length > 1
-            ? this.t("confirm.many", { n: list.length })
-            : this.t("confirm.one", { name: list[0].name }),
-          okText: this.t("confirm.cancelTask"),
-          onOk: async function () {
+            ? this.t("delete.many", { n: list.length })
+            : this.t("delete.one", { name: list[0].name }),
+          check: {
+            label: this.t("delete.withData"),
+            hint: this.t("delete.keepHint"),
+            value: false,
+          },
+          okText: this.t("delete.ok"),
+          onOk: function (box) {
             self.confirmBox = null;
-            try {
-              await window.EMU_API.transferApply(list.map((x) => x.hash), "cancel");
-              self.toast(self.t("msg.cancelled", { n: list.length }));
-              self.selection = [];
-              if (self.detail && list.some((x) => x.hash === self.detail.hash)) self.closeDetail();
-              await self.refresh();
-            } catch (e) {
-              self.fail("err.opFailed", e);
-            }
+            const withData = !!(box && box.check && box.check.value);
+            self.doDelete(list, withData);
           },
         };
+      },
+      doDelete: async function (list, withData) {
+        const hashes = list.map(function (x) { return x.hash; });
+        try {
+          const r = await window.EMU_API.transferDelete(hashes, !!withData);
+          const n = (r && r.count) || hashes.length;
+          // When the data is kept the backend reports the folder it moved the
+          // .part files into; one hint is enough, no per-row listing.
+          const kept = (r && r.results || []).filter(function (x) { return x && x.kept; })[0];
+          const msg = this.t("delete.done", { n: n });
+          this.toast(kept ? msg + " · " + this.t("delete.kept", { path: kept.kept }) : msg);
+          this.selection = [];
+          if (this.detail && list.some((x) => x.hash === this.detail.hash)) this.closeDetail();
+          await this.refresh();
+        } catch (e) {
+          this.fail("err.deleteFailed", e);
+        }
       },
 
       /* ---------------- add links ---------------- */
@@ -1744,15 +1774,18 @@
           total: Number(task.total) || 0,
         };
         const pct = this.updateProgress.percent;
-        /* 四个阶段的文案与 qbpanel 对齐 */
+        /* 阶段文案：下载 → 安装包就绪重启服务 → 服务重启等待上线。
+           进入安装/重启后总量不再有意义，把 total 清零让进度条切成不定式。 */
         if (task.phase === "downloading") {
           this.updateInstallDetail = this.t("settings.update.installingDownload");
         } else if (task.phase === "verifying") {
           this.updateInstallDetail = this.t("settings.update.verifying");
         } else if (task.phase === "installing") {
           this.updateInstallDetail = this.t("settings.update.installingReady");
+          this.updateProgress = Object.assign({}, this.updateProgress, { total: 0 });
         } else if (task.phase === "restarting") {
           this.updateInstallDetail = this.t("settings.update.installingWait");
+          this.updateProgress = Object.assign({}, this.updateProgress, { total: 0 });
         }
       },
       pollUpdateProgress: function (targetVersion) {
@@ -1790,11 +1823,11 @@
               return;
             }
           }
-          // 轮询间隔要约 200ms：更新包通常几 MB，在千兆内网不到 1 秒就下完，
-          // 1 秒一次只能抓到一两个中间值，看起来像"11% 直接跳到完成"。
-          setTimeout(tick, 200);
+          // 400ms 轮询：更新包通常几 MB，在千兆内网不到 1 秒就下完，
+          // 间隔太长只能抓到一两个中间值，看起来像"直接跳到完成"。
+          setTimeout(tick, 400);
         };
-        setTimeout(tick, 200);
+        setTimeout(tick, 400);
       },
       /* 新版本装好了：进度拉满、给个提示，然后整体重新加载页面。
          面板在升级过程中被卸载重装，前端的内存状态（版本号、设置、路由）

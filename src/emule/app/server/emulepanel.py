@@ -56,6 +56,10 @@ HISTORY_POINTS = 60        # /api/overview 返回最近 60 点
 UPDATE_TTL = 900
 UPDATE_FAIL_TTL = 60
 
+#: /api/transfers/*/action 与 /api/transfers/apply 可接受的 action 白名单。
+#: cancel 保留旧语义（= delete + delete_data=true），delete 是新的可选"是否删数据"入口。
+TRANSFER_ACTIONS = ("pause", "resume", "cancel", "priority", "delete")
+
 EXTRA_MIME = {
     ".js": "text/javascript; charset=utf-8",
     ".mjs": "text/javascript; charset=utf-8",
@@ -970,6 +974,26 @@ def int_or(value, fallback=0):
         return int(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def flag_or(value, fallback=False):
+    """把 JSON 里的开关值收敛成 bool。
+
+    bool("false") 是 True，前端如果传了字符串就会把"不删数据"变成"删数据"，
+    那是不可逆的破坏性操作，所以这里显式识别字符串与数字。
+    """
+    if value is None:
+        return bool(fallback)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("", "0", "false", "no", "off"):
+        return False
+    return bool(fallback)
 
 
 def normalize_overview(data):
@@ -2267,7 +2291,7 @@ class Handler(BaseHTTPRequestHandler):
             if not hashes:
                 self.fail(400, "请选择要操作的任务")
                 return
-            if action not in ("pause", "resume", "cancel", "priority"):
+            if action not in TRANSFER_ACTIONS:
                 self.fail(400, "不支持的操作：%s" % (action or "(空)"))
                 return
             priority = body.get("priority")
@@ -2275,6 +2299,10 @@ class Handler(BaseHTTPRequestHandler):
                 applied = [RT.call("transfer_action", file_hash, action, priority)
                            for file_hash in hashes]
                 result = {"ok": True, "applied": applied, "count": len(applied)}
+            elif action == "delete":
+                result = RT.call("transfer_delete", hashes, flag_or(body.get("delete_data")))
+                if not isinstance(result, dict):
+                    result = {"ok": True}
             else:
                 result = RT.call("transfer_apply", hashes, action)
                 if not isinstance(result, dict):
@@ -2291,10 +2319,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.require_method(method, "POST")
                 body = self.json_body()
                 action = str(body.get("action") or "").strip()
-                if action not in ("pause", "resume", "cancel", "priority"):
+                if action not in TRANSFER_ACTIONS:
                     self.fail(400, "不支持的操作：%s" % (action or "(空)"))
                     return
-                result = RT.call("transfer_action", file_hash, action, body.get("priority"))
+                if action == "delete":
+                    # 单条删除与批量走同一套实现，响应形状保持一致（results[0].kept）
+                    result = RT.call("transfer_delete", [file_hash], flag_or(body.get("delete_data")))
+                else:
+                    result = RT.call("transfer_action", file_hash, action, body.get("priority"))
                 payload = {"ok": True}
                 if isinstance(result, dict):
                     payload.update(result)

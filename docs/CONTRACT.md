@@ -91,8 +91,8 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 | GET | /api/transfers?type=download\|upload | 列表 + summary |
 | POST | /api/transfers/add | `{links:[...], category?, paused?}⟧ → 逐个结果 |
 | GET | /api/transfers/{hash} | 详情：来源列表 + 分块图 + 文件信息 |
-| POST | /api/transfers/{hash}/action | `{action:pause\|resume\|cancel\|priority, priority?}⟧ |
-| POST | /api/transfers/apply | 批量 `{hashes:[...], action}⟧ |
+| POST | /api/transfers/{hash}/action | `{action:pause\|resume\|cancel\|delete\|priority, priority?, delete_data?}⟧ |
+| POST | /api/transfers/apply | 批量 `{hashes:[...], action, delete_data?}⟧ |
 | GET | /api/servers | 服务器列表 + 当前连接 |
 | POST | /api/servers/connect | `{ip,port}⟧ |
 | POST | /api/servers/add, /remove, /priority | 增删改优先级 |
@@ -150,6 +150,30 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 //   "results":[{hash,name,size,sources,type,ext,percent,already}],"started_at":...}
 ```
 
+### 3.2 删除任务与数据保留（v26.11.35 新增）
+
+面板的垃圾桶是「删除任务」，不再是「取消任务」。aMule 的 `EC_OP_PARTFILE_DELETE`
+会无条件删掉 Temp 下的 `NNN.part` 与 `NNN.part.met`，所以“是否删掉已下载数据”
+由面板自己实现：默认先把数据搬进回收目录，只有勾上才彻底删除。
+
+```
+POST /api/transfers/{hash}/action   {"action":"delete", "delete_data": false}
+POST /api/transfers/apply           {"hashes":[...], "action":"delete", "delete_data": true}
+```
+
+- `delete_data=false`（默认）：先 PAUSE 让句柄释放，把
+  `<temp_dir>/NNN.part`、`NNN.part.met`、`NNN.part.met.bak`、`NNN.part.met.seeds`
+  移到 `<var_dir>/deleted/<HASH>/`，再发 PARTFILE_DELETE。数据留在回收目录，
+  用户可以自己去那里取回。
+- `delete_data=true`：直接 PARTFILE_DELETE，并清掉之前留在回收目录里的同 hash 数据。
+- 两种情况都会把任务从 aMule 队列里移除，列表里不再出现。
+- 安全：只处理匹配 `^\d{3,6}\.part(\.met(\.bak|\.seeds)?)?$` 的文件，且所有路径
+  都要 `realpath` 校验落在 temp_dir / var_dir 内，否则拒绝执行。
+  定位不到 partmet 编号时，`delete_data=false` 直接报错、不删任务。
+- 响应：在旧有 `ok / action / count / results` 基础上，`results` 每条多一个
+  `kept` 字段（保留目录路径，没有则为空串）。
+- 旧 `action:"cancel"` 保留，语义 = 删除 + 不保留数据（供 smoke_test / test_core 与脚本使用）。
+
 ## 4. core/service.py 接口（ec-core ⇄ panel-api 的边界）
 
 panel-api 只依赖这个门面，不直接碰 EC/进程。所有方法同步、线程安全，失败抛
@@ -168,6 +192,7 @@ class EmuleService:
     def transfer_detail(self, file_hash: str) -> dict
     def transfer_action(self, file_hash: str, action: str, priority: str|None = None) -> dict
     def transfer_apply(self, hashes, action: str) -> dict
+    def transfer_delete(self, hashes, delete_data: bool = False) -> dict
     def add_links(self, links, category: str = "", paused: bool = False) -> list
     def servers(self) -> dict
     def server_connect(self, ip, port) -> dict

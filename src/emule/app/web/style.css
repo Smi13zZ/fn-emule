@@ -289,6 +289,7 @@ input[type="number"] { -moz-appearance: textfield; }
    the flex layout - which silently drops both the gap and the centring. */
 .field > label.switch { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 0; }
 
+
 /* custom file picker - the native control's button label is OS-localised and
    cannot be translated, so it is hidden behind a styled trigger */
 .filepick { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -524,6 +525,17 @@ input[type="number"] { -moz-appearance: textfield; }
 .field .row > .input, .field .row > .select { flex: 1; }
 .field .btn { flex: 0 0 auto; }
 .hint { font-size: 12px; color: var(--faint); margin-top: 5px; }
+
+/* Optional checkbox inside the confirm box (e.g. "also delete the data files").
+   The spacing is a margin, not a template line break: Vue's in-DOM compiler
+   drops whitespace-only text nodes, so a newline between the text and the
+   label collapses to nothing. Declared after .hint so the hint's own
+   margin-top does not win over .confirm-hint. */
+.confirm-extra { margin-top: 14px; }
+.confirm-check { display: flex; align-items: flex-start; gap: 8px; line-height: 1.45; }
+.confirm-check input[type="checkbox"] { margin-top: 2px; }
+/* one quiet line under the checkbox; the text lines up with the label, not the box */
+.confirm-hint { margin-top: 6px; padding-left: 23px; }
 /* Field rhythm lives on the GRID, not on its children: on a phone the grid
    collapses to one column, so the row-2 field is also :last-child - its
    margin-bottom:0 (from .field:last-child) used to leave the grid with no

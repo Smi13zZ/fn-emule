@@ -289,7 +289,7 @@
           <span class="chip">{{ t('tasks.selected', { n: selection.length }) }}</span>
           <button class="btn sm" @click="bulk('pause')">{{ t('tasks.pause') }}</button>
           <button class="btn sm" @click="bulk('resume')">{{ t('tasks.resume') }}</button>
-          <button class="btn sm danger" @click="askCancel(selectedTasks)">{{ t('tasks.cancel') }}</button>
+          <button class="btn sm danger" @click="askDelete(selectedTasks)">{{ t('tasks.delete') }}</button>
           <div class="spacer"></div>
           <button class="btn sm" @click="selection = []">{{ t('tasks.clearSel') }}</button>
         </div>
@@ -365,8 +365,8 @@
                               :aria-label="fmt.isPaused(it) ? t('tasks.resume') : t('tasks.pause')">
                         <span v-html="ic(fmt.isPaused(it) ? 'play' : 'pause')"></span>
                       </button>
-                      <button class="btn sm icon danger" @click="askCancel([it])" :title="t('tasks.cancel')"
-                              :aria-label="t('tasks.cancel')">
+                      <button class="btn sm icon danger" @click="askDelete([it])" :title="t('tasks.delete')"
+                              :aria-label="t('tasks.delete')">
                         <span v-html="ic('trash')"></span>
                       </button>
                     </td>
@@ -392,7 +392,7 @@
                     <button class="btn sm icon" @click="togglePause(it)" :title="t('tasks.pause')">
                       <span v-html="ic(fmt.isPaused(it) ? 'play' : 'pause')"></span>
                     </button>
-                    <button class="btn sm icon danger" @click="askCancel([it])" :title="t('tasks.cancel')">
+                    <button class="btn sm icon danger" @click="askDelete([it])" :title="t('tasks.delete')">
                       <span v-html="ic('trash')"></span>
                     </button>
                   </div>
@@ -1447,7 +1447,7 @@
               {{ t('priority.' + p) }}
             </button>
             <div class="spacer"></div>
-            <button class="btn sm danger" @click="askCancel([detail])">{{ t('detail.cancel') }}</button>
+            <button class="btn sm danger" @click="askDelete([detail])">{{ t('detail.delete') }}</button>
           </div>
         </div>
 
@@ -1541,18 +1541,17 @@
         <textarea class="textarea" rows="6" v-model="addForm.links" :placeholder="t('add.linksPh')"></textarea>
         <div class="hint">{{ t('add.hint') }}</div>
       </div>
-      <div class="form-grid">
-        <div class="field">
-          <label>{{ t('add.category') }}</label>
-          <input class="input" v-model="addForm.category" :placeholder="t('add.categoryPh')">
-        </div>
-        <div class="field">
-          <label class="switch" style="margin-top:24px">
-            <input type="checkbox" v-model="addForm.paused">
-            <span>{{ t('add.paused') }}</span>
-          </label>
-        </div>
+      <div class="field">
+        <label>{{ t('add.category') }}</label>
+        <input class="input" v-model="addForm.category" :placeholder="t('add.categoryPh')">
       </div>
+      <!-- "add paused" is a full-width row under the category field. The 14px gap
+           comes from the .field above (CSS), not from this template newline:
+           the in-DOM compiler drops whitespace-only text nodes. -->
+      <label class="switch">
+        <input type="checkbox" v-model="addForm.paused">
+        <span>{{ t('add.paused') }}</span>
+      </label>
     </div>
     <div class="modal-foot">
       <div class="spacer"></div>
@@ -1635,6 +1634,13 @@
     <div class="modal-head">{{ confirmBox.title }}</div>
     <div class="modal-body">
       <div>{{ confirmBox.text }}</div>
+      <div v-if="confirmBox.check" class="confirm-extra">
+        <label class="switch confirm-check">
+          <input type="checkbox" v-model="confirmBox.check.value">
+          <span>{{ confirmBox.check.label }}</span>
+        </label>
+        <div class="hint confirm-hint" v-if="confirmBox.check.hint">{{ confirmBox.check.hint }}</div>
+      </div>
     </div>
     <div class="modal-foot">
       <div class="spacer"></div>

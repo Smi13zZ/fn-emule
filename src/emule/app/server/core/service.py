@@ -173,6 +173,28 @@ def _clamp(value, low, high):
     return max(low, min(high, value))
 
 
+# ---------------------------------------------------------------- 删除任务
+#: aMule 在 Temp 下的分片数据文件名：NNN.part / .part.met / .part.met.bak / .part.met.seeds
+_PART_FILE_RE = re.compile(r"^\d{3,6}\.part(\.met(\.bak|\.seeds)?)?$")
+
+#: 32 位大写十六进制文件哈希
+_HASH_RE = re.compile(r"^[0-9A-F]{32}$")
+
+#: delete_data=False 时保留数据的子目录名（<var_dir>/deleted/<HASH>/）
+DELETED_DIRNAME = "deleted"
+
+#: PAUSE+STOP 之后等 aMule 释放文件句柄的时长（秒）
+PARTFILE_STOP_WAIT = 0.15
+
+
+def _within_root(path, root):
+    """path 是否落在 root 之内（都应是 realpath 过的绝对路径）。"""
+    if not path or not root:
+        return False
+    root = root.rstrip(os.sep) or os.sep
+    return path == root or path.startswith(root + os.sep)
+
+
 # aMule 的日志行形如 " 2026-11-03 01:30:19: 文本"，重要行前面还会加 "!"
 # ---------------------------------------------------------------- 统计项文案
 # aMule 的统计节点名字是 printf 格式串（"Uptime: %s"、"Total: %i Known: %i"、
@@ -979,12 +1001,156 @@ class EmuleService(object):
         for file_hash in (hashes or []):
             try:
                 result = self.transfer_action(file_hash, action)
-                results.append({"hash": result["hash"], "ok": True, "error": ""})
+                results.append({"hash": result["hash"], "ok": True, "error": "", "kept": ""})
             except EmuleError as exc:
                 ok_all = False
                 results.append({"hash": str(file_hash or "").strip().upper(),
-                                "ok": False, "error": str(exc)})
+                                "ok": False, "error": str(exc), "kept": ""})
         return {"ok": ok_all, "action": action, "count": len(results), "results": results}
+
+    # ------------------------------------------------------------ 删除任务
+    def transfer_delete(self, hashes, delete_data=False):
+        """删除下载任务；delete_data=False 时先把 <temp_dir>/NNN.part 系列搬到回收目录。
+
+        delete_data=True  → 直接 EC DELETE（aMule 的 CPartFile::Delete 会删掉 Temp 下的
+                            .part 与 .part.met 系列），并顺手清掉该 hash 的回收目录。
+        delete_data=False → PAUSE → STOP → 等句柄落盘 → 搬文件 → DELETE。
+                            STOP 走 CPartFile::StopFile()，它会 FlushBuffer()，否则缓冲区里
+                            最后几 MB 还挂在旧 inode 上，搬出来的 .part 与 .part.met 的
+                            gap 记录对不上。
+        每个 hash 一个结果条目：{hash, ok, error, kept}，kept 是保留目录路径（没有则空串）。
+        """
+        cleaned = self._partfile_hashes(hashes)
+        client = self._online_client()
+        engine = self._engine_settings()
+        temp_dir = (engine.get("temp_dir") or "").strip()
+        var_dir = self.var_dir
+        delete_data = bool(delete_data)
+        records = {}
+        for record in client.download_queue():
+            key = (record.get("hash") or "").upper()
+            if key:
+                records[key] = record
+        results = []
+        ok_all = True
+        for file_hash in cleaned:
+            try:
+                kept = self._delete_one(client, file_hash, records.get(file_hash),
+                                        temp_dir, var_dir, delete_data)
+                results.append({"hash": file_hash, "ok": True, "error": "", "kept": kept})
+            except (EmuleOffline, EmuleTimeout):
+                raise                       # 引擎掉线/超时是整体故障，不要伪装成"这一条失败"
+            except EmuleError as exc:
+                ok_all = False
+                results.append({"hash": file_hash, "ok": False, "error": str(exc), "kept": ""})
+        return {"ok": ok_all, "action": "delete", "delete_data": delete_data,
+                "count": len(results), "results": results}
+
+    def _delete_one(self, client, file_hash, record, temp_dir, var_dir, delete_data):
+        """单个 hash 的删除实现，返回保留目录路径（没有搬走任何文件时为空串）。"""
+        if record is None:
+            raise EmuleError("下载列表里没有该文件：%s" % file_hash)
+        partmet_id = int(record.get("partmet_id") or 0)
+        if delete_data:
+            # 彻底删除：aMule 的 CPartFile::Delete 自己会清 Temp 下的 .part/.part.met，
+            # 我们只需把同一 hash 的回收目录一并清掉。先删任务再清目录：清目录失败
+            # （路径不合规等）不该连"删任务"这个用户诉求一起否掉。
+            client.partfile_command(Op.PARTFILE_DELETE, file_hash)
+            self._purge_deleted_dir(var_dir, file_hash)
+            return ""
+        # 保留数据：定位不到 partmet 就整体放弃（安全优先：宁可不删，也不留半套文件）
+        if partmet_id <= 0:
+            raise EmuleError("无法定位临时数据文件，未执行删除")
+        plan = self._plan_quarantine(temp_dir, var_dir, file_hash, partmet_id)
+        self._stop_partfile(client, file_hash)
+        kept = self._run_quarantine(plan)
+        client.partfile_command(Op.PARTFILE_DELETE, file_hash)
+        return kept
+
+    @staticmethod
+    def _part_file_names(partmet_id):
+        """partmet 编号 → Temp 下属于该任务的四个文件名（aMule 用 %03u.part.met）。"""
+        if partmet_id <= 0:
+            return []
+        stem = "%03d.part" % partmet_id
+        return [stem, stem + ".met", stem + ".met.bak", stem + ".met.seeds"]
+
+    def _stop_partfile(self, client, file_hash):
+        """暂停 + 停盘，让缓冲区块真正写进 .part 后再搬文件。"""
+        try:
+            client.partfile_command(Op.PARTFILE_PAUSE, file_hash)
+            client.partfile_command(Op.PARTFILE_STOP, file_hash)
+        except (EmuleOffline, EmuleTimeout):
+            raise                       # 引擎掉线/超时原样上抛，面板据此回 503/504
+        except EmuleError as exc:
+            raise EmuleError("暂停任务失败，未执行删除：%s" % exc)
+        time.sleep(PARTFILE_STOP_WAIT)
+
+    def _plan_quarantine(self, temp_dir, var_dir, file_hash, partmet_id):
+        """只做路径计算与越界校验，不碰磁盘；任何一处越界都抛 EmuleError。"""
+        names = self._part_file_names(partmet_id)
+        if not names:
+            raise EmuleError("无法定位临时数据文件，未执行删除")
+        if not temp_dir:
+            raise EmuleError("临时目录未配置，未执行删除")
+        temp_root = os.path.realpath(temp_dir)
+        if not os.path.isdir(temp_root):
+            raise EmuleError("临时目录不存在，未执行删除：%s" % temp_dir)
+        kept_dir = self._deleted_dir_path(var_dir, file_hash)
+        sources = []
+        for name in names:
+            if not _PART_FILE_RE.match(name):
+                raise EmuleError("临时数据文件名不合规，未执行删除：%s" % name)
+            source = os.path.join(temp_dir, name)
+            if not _within_root(os.path.realpath(source), temp_root):
+                raise EmuleError("临时数据文件路径越界，未执行删除：%s" % source)
+            target = os.path.join(kept_dir, name)
+            if os.path.basename(target) != name or \
+                    not _within_root(os.path.realpath(target), kept_dir):
+                raise EmuleError("保留目录路径越界，未执行删除：%s" % target)
+            sources.append({"name": name, "source": source, "target": target})
+        return {"kept_dir": kept_dir, "sources": sources}
+
+    def _run_quarantine(self, plan):
+        """按计划把存在的文件搬到回收目录；返回保留目录路径（一个都没搬走时为空串）。"""
+        kept_dir = plan["kept_dir"]
+        pending = [item for item in plan["sources"] if os.path.exists(item["source"])]
+        if not pending:
+            return ""
+        try:
+            os.makedirs(kept_dir, exist_ok=True)
+        except OSError as exc:
+            raise EmuleError("创建保留目录失败：%s" % exc)
+        for item in pending:
+            try:
+                # Temp 与 var 可能不在同一个卷上，shutil.move 会自动退化成复制后删除
+                shutil.move(item["source"], item["target"])
+            except (OSError, shutil.Error) as exc:
+                raise EmuleError("搬迁临时数据失败（%s）：%s" % (item["name"], exc))
+        return kept_dir
+
+    def _deleted_dir_path(self, var_dir, file_hash):
+        """<var_dir>/deleted/<HASH>/，并校验落在 var_dir 之内。"""
+        if not _HASH_RE.match(file_hash or ""):
+            raise EmuleError("文件哈希不合法，未执行删除：%s" % file_hash)
+        root = os.path.realpath(var_dir)
+        target = os.path.join(var_dir, DELETED_DIRNAME, file_hash)
+        if not _within_root(os.path.realpath(target), root):
+            raise EmuleError("保留目录路径越界，未执行删除：%s" % target)
+        return target
+
+    def _purge_deleted_dir(self, var_dir, file_hash):
+        """删掉 <var_dir>/deleted/<HASH>/（不存在则什么都不做）。"""
+        try:
+            target = self._deleted_dir_path(var_dir, file_hash)
+        except EmuleError:
+            return
+        if not os.path.isdir(target) or os.path.islink(target):
+            return
+        try:
+            shutil.rmtree(target, ignore_errors=True)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------ 添加链接
     _ED2K_RE = re.compile(r"^ed2k://\|file\|(?P<name>[^|]*)\|(?P<size>\d+)\|(?P<hash>[0-9a-fA-F]{32})\|/?$")
