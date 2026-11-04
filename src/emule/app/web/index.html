@@ -1518,10 +1518,10 @@
           <div class="upprog-fill" :style="{ width: updateProgressPct + '%' }"></div>
         </div>
         <div class="upprog-meta">
-          <span>{{ updateProgressPct }}%</span>
-          <span v-if="updateProgress.total">
+          <span class="upmeta-size" v-if="updateProgress.total">
             {{ fmt.fmtBytes(updateProgress.received) }} / {{ fmt.fmtBytes(updateProgress.total) }}
           </span>
+          <span class="upmeta-pct">{{ updateProgressPct }}%</span>
         </div>
       </template>
       <div class="upprog-ready" v-else>{{ t('settings.update.progressUnknown') }}</div>
@@ -1631,7 +1631,7 @@
 
 <!-- ================= confirm ================= -->
 <div class="modal-wrap" v-if="confirmBox">
-  <div class="modal" style="width:min(440px,100%)">
+  <div class="modal confirm" style="width:min(440px,100%)">
     <div class="modal-head">{{ confirmBox.title }}</div>
     <div class="modal-body">
       <div>{{ confirmBox.text }}</div>

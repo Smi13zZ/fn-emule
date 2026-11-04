@@ -511,6 +511,12 @@ input[type="number"] { -moz-appearance: textfield; }
 .modal-foot { padding: 14px 18px; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 .modal-foot .spacer { flex: 1; }
 
+/* 确认框：只有标题/正文/按钮三段，不需要表单那种底部留白。
+   .modal 自身的 padding-bottom 和 .modal-body 的 padding 会叠加，
+   在手机上表现为按钮下面塌出一大块空白，所以这里都收掉。 */
+.modal.confirm { padding-bottom: 0; }
+.modal.confirm .modal-body { padding-bottom: 16px; }
+
 /* form fields - one rhythm everywhere */
 .field { margin-bottom: 14px; }
 .field:last-child { margin-bottom: 0; }
@@ -714,6 +720,8 @@ input[type="number"] { -moz-appearance: textfield; }
   font-variant-numeric: tabular-nums;
   width: 100%; min-height: 17px;
 }
+/* 百分比只换颜色和字重，字号跟前面的已下载大小保持一致（都继承父级 11.5px） */
+.upmeta-pct { color: var(--text); font-weight: 600; }
 /* 准备中：没有进度条，文字在整块 30px 空间里上下正中 */
 .upprog-ready {
   flex: 1 1 auto;
