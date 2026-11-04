@@ -99,6 +99,14 @@ class ServiceMissing(Exception):
     """core.service 不可用 —— 面板处于降级模式。"""
 
 
+class BadRequest(Exception):
+    """请求体本身有问题（JSON 畸形、字段类型不对）。
+
+    单独一个异常类型，才能在 route() 里回 400 —— 否则畸形 JSON 会被
+    json_body() 静默降级成空 dict，接口照样回 200，写没写进去都看不出来。
+    """
+
+
 def is_timeout_message(message):
     """EC 读超时和「引擎没起」抛的是同一个 EmuleOffline，只能靠消息里的字样区分：
     超时类要回 504（引擎还在，只是没按时回包），其余回 503（引擎真的不可用）。"""
@@ -1980,14 +1988,22 @@ class Handler(BaseHTTPRequestHandler):
         return b"".join(chunks)
 
     def json_body(self):
+        """读并解析请求体。
+
+        空 body 视为 {}（DELETE / 无参 POST 是合法用法）；但 body 非空却不是
+        合法 JSON 对象时必须抛 BadRequest —— 静默当成 {} 会让"请求格式错了"
+        伪装成"操作成功"，排查时完全看不出问题。
+        """
         raw = self.read_body()
         if not raw:
             return {}
         try:
             data = json.loads(raw.decode("utf-8", "replace"))
-        except ValueError:
-            return {}
-        return data if isinstance(data, dict) else {}
+        except ValueError as exc:
+            raise BadRequest("请求体不是合法的 JSON：%s" % (exc,))
+        if not isinstance(data, dict):
+            raise BadRequest("请求体必须是 JSON 对象")
+        return data
 
     def send_payload(self, status, body=b"", ctype="application/json; charset=utf-8", extra=None):
         if isinstance(body, str):
@@ -2055,6 +2071,8 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(503, str(exc) or "引擎组件不可用")
         except EngineFailure as exc:
             self.fail(error_status(exc), str(exc) or "引擎操作失败")
+        except BadRequest as exc:
+            self.fail(400, str(exc) or "请求格式不对")
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as exc:  # noqa: BLE001 - 任何未预期异常都要回一句中文
