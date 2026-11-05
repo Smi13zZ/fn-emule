@@ -87,6 +87,8 @@ eMule 电驴把 **aMule**（eMule 在 Linux 上的官方同源实现）做成了
 |---|---|
 | ![添加任务](docs/screenshots/add-task.png) | ![删除任务](docs/screenshots/delete-task.png) |
 
+![版本更新](docs/screenshots/update-autocheck.png)
+
 ---
 
 ## 安装

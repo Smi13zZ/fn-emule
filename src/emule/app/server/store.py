@@ -126,6 +126,42 @@ def default_settings(env=None, share_dir=""):
     }
 
 
+def _preserve_channel_secrets(channels, existing):
+    """整份配置保存时，通知通道里被打码的密钥必须保留原值。
+
+    GET /api/settings 会把已保存的密钥换成 SECRET_MARK 再回给浏览器；浏览器如果
+    把拿到的那份 settings 原样 POST 回来（改主题、切语言、保存别的分区都会这么做），
+    channels 是 list、deep_merge 对 list 是整体替换，密钥就被字面量 "__SET__"
+    覆盖掉了 —— 之后的推送全是 400，而且界面上看不出来（输入框本来就显示「已保存」）。
+
+    所以凡是带 id 的通道，都用 notify.merge_config 跟旧配置合并一次：
+    提交的是打码值或空串就沿用原密钥，提交了新值才替换。
+    """
+    if not isinstance(channels, list):
+        return channels
+    import notify as notifymod            # 延迟导入：store 是持久层，不该在导入期依赖通道定义
+    by_id = {}
+    for channel in existing or []:
+        if isinstance(channel, dict) and channel.get("id"):
+            by_id[str(channel.get("id"))] = channel
+    out = []
+    for channel in channels:
+        if not isinstance(channel, dict):
+            out.append(channel)
+            continue
+        old = by_id.get(str(channel.get("id") or ""))
+        if not old:
+            out.append(copy.deepcopy(channel))
+            continue
+        item = copy.deepcopy(channel)
+        item["config"] = notifymod.merge_config(
+            channel.get("type") or old.get("type"),
+            channel.get("config") if isinstance(channel.get("config"), dict) else {},
+            old.get("config") if isinstance(old.get("config"), dict) else {})
+        out.append(item)
+    return out
+
+
 def deep_merge(base, patch):
     """递归合并：dict 逐键合并，list 与标量整体替换。返回新对象，不改入参。"""
     out = copy.deepcopy(base) if isinstance(base, dict) else {}
@@ -293,6 +329,13 @@ class Store(object):
                 engine_patch.pop("ec_password", None)
             else:
                 engine_patch["ec_password"] = str(password).strip()
+        notify_patch = patch.get("notify")
+        if isinstance(notify_patch, dict) and "channels" in notify_patch:
+            # 整份保存时把打码的通道密钥还原成真实值（见 _preserve_channel_secrets）
+            with self._lock:
+                existing = copy.deepcopy((self.data.get("notify") or {}).get("channels") or [])
+            notify_patch["channels"] = _preserve_channel_secrets(
+                notify_patch["channels"], existing)
         with self._lock:
             before = self.data
             merged = deep_merge(before, patch)

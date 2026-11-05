@@ -1316,9 +1316,6 @@
           </div>
           <div class="hint" style="color:var(--danger);margin-top:10px" v-if="updateError">{{ updateError }}</div>
           <!-- 进度只在弹窗里显示：卡片再放一份会和遮罩下的弹窗视觉重复 -->
-          <div class="hint ok" style="margin-top:10px" v-if="updateDownloaded">
-            {{ t('settings.update.downloadedHint', { n: updateDownloaded.name || '', p: '/var/apps/fn-emule/var/updates' }) }}
-          </div>
 
           <div class="sep"></div>
           <h3>{{ t('settings.update.notes') }}</h3>
@@ -1334,6 +1331,7 @@
             <dd>{{ updateInfo && updateInfo.published_at ? updateInfo.published_at.slice(0, 10) : '—' }}</dd>
           </dl>
           <div class="hint" style="margin-top:12px">{{ t('settings.update.hint') }}</div>
+          <div class="hint" style="margin-top:6px">{{ t('settings.update.autoCheck') }}</div>
         </div>
 
         <!-- ---------- about ---------- -->

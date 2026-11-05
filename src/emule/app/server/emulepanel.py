@@ -55,6 +55,11 @@ BACKUP_CHECK_INTERVAL = 300.0
 HISTORY_POINTS = 60        # /api/overview 返回最近 60 点
 UPDATE_TTL = 900
 UPDATE_FAIL_TTL = 60
+#: 后台自查新版本：先等一分钟让面板把请求服务起来，之后每小时一次。
+#: 这个节奏跟浏览器开没开无关——挂在 NAS 上的机器常年没人开面板，
+#: 但更新通知（含通知渠道推送）就是靠这条线程发出去的。
+UPDATE_POLL_DELAY = 60.0
+UPDATE_POLL_INTERVAL = 3600.0
 
 #: /api/transfers/*/action 与 /api/transfers/apply 可接受的 action 白名单。
 #: cancel 保留旧语义（= delete + delete_data=true），delete 是新的可选"是否删数据"入口。
@@ -734,6 +739,7 @@ class Runtime(object):
             (self.sample_loop, "sample"),
             (self.notify_loop, "notify"),
             (self.backup_loop, "backup"),
+            (self.update_poll_loop, "update-poll"),
         ):
             thread = threading.Thread(target=target, name=name, daemon=True)
             thread.start()
@@ -820,6 +826,33 @@ class Runtime(object):
                 self.log("自动备份完成：%s" % result.get("name"))
             except Exception as exc:  # noqa: BLE001
                 self.log("自动备份失败：%r" % (exc,), level="error")
+
+    # -- 后台自查新版本 -----------------------------------------------------
+    def update_poll_loop(self):
+        """面板自己定期查一次新版本，跟浏览器开没开无关。
+
+        之前的版本检查只在浏览器里发起：页面加载后查一次、切到「更新」分区再补一次。
+        NAS 上的机器常年没人开面板，于是永远不知道有没有新版本，通知渠道也就永远
+        发不出「有新版本」那条。这里补一条后台线程：启动约一分钟后查第一次，
+        之后每小时一次；UpdateChecker 内部本来就有 900 秒缓存和 60 秒失败冷却，
+        跟浏览器端撞在一起也不会多打 GitHub 的匿名额度。
+
+        循环体整体兜住异常：断网、限流、解析失败都只记一行日志，线程必须活着。
+        """
+        if self.stopping.wait(UPDATE_POLL_DELAY):
+            return
+        while not self.stopping.is_set():
+            try:
+                cfg = self.store.section("update")
+                if cfg.get("check", True):
+                    info = self.update_checker.check(force=False)
+                    if isinstance(info, dict) and info.get("has_update"):
+                        self.log("后台检查更新：发现新版本 v%s（当前 %s）"
+                                 % (info.get("latest") or "?", self.version))
+            except Exception as exc:  # noqa: BLE001 - 后台线程不能因为一次失败退出
+                self.log("后台检查更新失败：%r" % (exc,), level="warn")
+            if self.stopping.wait(UPDATE_POLL_INTERVAL):
+                break
 
     # -- 通知 ---------------------------------------------------------------
     def dispatch_event(self, event, item):

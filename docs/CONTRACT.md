@@ -115,6 +115,7 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 | POST | /api/notify/settings, /channel, /test | 通知配置 |
 | GET | /api/backup/status · POST /api/backup/run, /restore | 配置备份 |
 | GET | /api/update/check · POST /api/update/install | GitHub Release 更新（未发布时优雅返回 no_release） |
+| — | 版本检查节奏 | 见 §3.3：进程内每小时自查一次，前端打开期间每 30 分钟刷新 |
 
 核心载荷（前端按此渲染，字段不得随意改名）：
 
@@ -173,6 +174,38 @@ POST /api/transfers/apply           {"hashes":[...], "action":"delete", "delete_
 - 响应：在旧有 `ok / action / count / results` 基础上，`results` 每条多一个
   `kept` 字段（保留目录路径，没有则为空串）。
 - 旧 `action:"cancel"` 保留，语义 = 删除 + 不保留数据（供 smoke_test / test_core 与脚本使用）。
+
+### 3.4 通道密钥不能被整份保存覆盖（v26.11.37）
+
+GET /api/settings 与 GET /api/notify 对已保存的通道密钥一律回传 SECRET_MARK（字面量「__SET__」）。
+浏览器把拿到的那份 settings 原样 POST 回来的话，channels 是 list、deep_merge 对 list 是
+整体替换，密钥就会被字面量覆盖。两道防线：
+
+1. **服务端兼底**：`store.update()` 在收到带 channels 的 notify 补丁时，用
+   `_preserve_channel_secrets()` 按 id 把每个通道与已存配置合并：提交的是
+   SECRET_MARK 或空串就沿用原密钥，只有真填了新值才替换。
+2. **前端**：改主题、切语言这类即时生效的保存只提交 `{panel: {...}}`，
+   不再把整份 draft（含通道密钥）回传。
+
+已经被写成 SECRET_MARK 的通道无法自动恢复（真实密钥已经丢了），需要重新填一次。
+
+### 3.3 版本检查节奏（v26.11.36 新增）
+
+版本检查不再只发生在浏览器里，分两层：
+
+- **服务端**：面板进程启动后约 60 秒检查第一次，之后每 3600 秒一次
+  （UPDATE_POLL_DELAY / UPDATE_POLL_INTERVAL），由 Runtime.update_poll_loop 在
+  start_workers() 里拉起，与浏览器是否打开无关。发现新版本时照常让
+  notify_update_event 推送（同一版本只推一次，记在 var/notify-state.json）。
+  循环体整体 try/except，任何一次失败只记日志，线程不能退出；
+  settings.update.check 为 false 时不发起查询。
+- **浏览器端**：页面打开期间每 30 分钟 checkUpdate(false)；
+  visibilitychange 变可见且距 lastUpdateCheckAt 超过 30 分钟时补查。
+  手动点「检查更新」时如果正有一次自动检查在跑，记一个标记，
+  等它结束后再 checkUpdate(true) 补一次，不静默丢失用户意图。
+- 两侧都走 UpdateChecker 的 900 秒成功缓存与 60 秒失败冷却，
+  真正落到 GitHub 的请求最多约 15 分钟一次，不会把匿名额度打满。
+- 「设置 → 更新」底部有一行 settings.update.autoCheck 说明这两个节奏。
 
 ## 4. core/service.py 接口（ec-core ⇄ panel-api 的边界）
 

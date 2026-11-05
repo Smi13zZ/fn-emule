@@ -68,6 +68,9 @@
 
   const POLL_MS = 2500;
   const LOG_POLL_MS = 5000;
+  /* 页面开着的时候每隔这么久刷新一次更新状态；后端有 900 秒缓存，
+     真正打到 GitHub 的请求最多每 15 分钟一次，不会把匿名额度耗光。 */
+  const UPDATE_CHECK_MS = 30 * 60 * 1000;
   /* 与后端 /api/log 的上限（2000）对齐 */
   const LOG_FETCH_LIMIT = 2000;
   const BACKUP_ROWS = 5;
@@ -214,6 +217,8 @@
         updateBanner: true,
         /* 一键更新的下载进度（后台任务轮询回来的） */
         updateProgress: { percent: 0, phase: "idle", received: 0, total: 0 },
+        /* 上一次发起版本检查的时刻（毫秒）。切回窗口时按它判断要不要补查 */
+        lastUpdateCheckAt: 0,
         /* 正在更新到的目标版本号，用于弹窗标题 */
         updateTargetVersion: "",
         installTimer: null,
@@ -571,12 +576,24 @@
         if (this._mmq.addEventListener) this._mmq.addEventListener("change", this._onViewport);
         else if (this._mmq.addListener) this._mmq.addListener(this._onViewport);
       }
+      /* 面板一直开着也要能跟上版本：定时刷新 + 切回窗口时按需补查。
+         两者都走非强制检查（checkUpdate(false)），命中后端缓存就不发网络请求。 */
+      this._updateTimer = setInterval(() => { this.checkUpdate(false); }, UPDATE_CHECK_MS);
+      this._onVisibility = () => {
+        if (document.hidden) return;
+        const since = Date.now() - (this.lastUpdateCheckAt || 0);
+        if (since >= UPDATE_CHECK_MS) this.checkUpdate(false);
+      };
+      document.addEventListener("visibilitychange", this._onVisibility);
     },
 
     beforeUnmount: function () {
       clearInterval(this._sparkTimer);
+      clearInterval(this._tickTimer);
       clearInterval(this.searchTimer);
       clearInterval(this.installTimer);
+      clearInterval(this._updateTimer);
+      document.removeEventListener("visibilitychange", this._onVisibility);
       window.removeEventListener("resize", this._onResize);
       if (this._mq && this._onScheme) {
         if (this._mq.removeEventListener) this._mq.removeEventListener("change", this._onScheme);
@@ -686,7 +703,7 @@
         document.documentElement.setAttribute("lang", this.lang === "zh" ? "zh-CN" : "en");
 
         await this.bootstrapPanel();
-        setInterval(this.tick, 1000);
+        this._tickTimer = setInterval(this.tick, 1000);
         setTimeout(() => { this.checkUpdate(false); }, 1800);
       },
 
@@ -1432,7 +1449,9 @@
       persistDraft: async function () {
         try {
           this.settingsSaving = true;
-          await window.EMU_API.saveSettings(this.draft);
+          // 只提交面板分区：整份 draft 里带着被后端打码过的通道密钥，原样回传会让
+          // 服务端把 "__SET__" 当成新密钥存下来（这条路径就是改主题/切语言）。
+          await window.EMU_API.saveSettings({ panel: this.draft.panel });
           this.settings = clone(this.draft);
           this.saved = clone(this.draft);
           this.applyTheme();
@@ -1710,12 +1729,20 @@
         return fromInfo || fromCfg || "Smi13zZ/fn-emule";
       },
       checkUpdate: async function (force) {
-        if (this.updateChecking) return;
+        /* 手动点「检查更新」时如果正好有一次自动检查在飞，别把它丢掉：
+           挂个标记，等这一轮结束后再按用户意图强制重查一次。 */
+        if (this.updateChecking) {
+          if (force) this._updateCheckQueued = true;
+          return;
+        }
         this.updateChecking = true;
         this.updateError = "";
         try {
           const r = await window.EMU_API.updateCheck(!!force);
           this.updateInfo = r || null;
+          /* 只有「查成功了」才把时钟拨到当前：一次断网失败不该让切回窗口的补查
+             再迟 30 分钟才发生。 */
+          if (r && !r.error) this.lastUpdateCheckAt = Date.now();
           if (r && r.error) {
             this.updateError = this.t("settings.update.failed", { v: r.error });
           }
@@ -1725,6 +1752,10 @@
           this.updateError = this.t("settings.update.failed", { v: (e && e.message) || "" });
         } finally {
           this.updateChecking = false;
+          if (this._updateCheckQueued) {
+            this._updateCheckQueued = false;
+            this.checkUpdate(true);
+          }
         }
       },
       askInstallUpdate: function () {
@@ -1746,7 +1777,6 @@
         if (this.updateInstalling) return;
         this.updateInstalling = true;
         this.updateError = "";
-        this.updateDownloaded = null;
         this.updateProgress = { percent: 0, phase: "downloading", received: 0, total: 0 };
         this.updateInstallDetail = this.t("settings.update.installingDownload");
         this.updateTargetVersion = (this.updateInfo && this.updateInfo.latest) || "";
