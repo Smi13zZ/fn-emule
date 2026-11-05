@@ -42,6 +42,8 @@ BACKUP_KEEP_MIN = 1
 BACKUP_KEEP_MAX = 60
 LOG_MAX_BYTES = 2 * 1024 * 1024
 LOG_READ_BYTES = 256 * 1024
+#: added.json 里最多留多少个 hash（任务删除时会主动清理，这是兜底上限）
+ADDED_RECORDS_MAX = 5000
 
 VERSION_FALLBACK = "26.11.0"
 
@@ -199,9 +201,12 @@ class Store(object):
         self.update_dir = os.path.join(self.var_dir, "updates")
         self.history_dir = os.path.join(self.var_dir, "history")
         self.notify_log_path = os.path.join(self.history_dir, "notify-log.json")
+        # 添加时间记录：{大写 hash: 首次见到的 Unix 秒}，面板重启后继续沿用
+        self.added_path = os.path.join(self.var_dir, "added.json")
 
         self._lock = threading.RLock()
         self._history = collections.deque(maxlen=HISTORY_MAX)
+        self._added = None
         self.data = {}
 
     # -- 路径 ---------------------------------------------------------------
@@ -482,6 +487,103 @@ class Store(object):
     def clear_notify_records(self):
         with self._lock:
             self._save_notify_records([])
+
+    # -- 添加时间 -----------------------------------------------------------
+    def added_time(self, file_hash, now=None):
+        """该 hash 的“添加时间”（面板第一次在下载列表里见到它的时刻）。
+
+        aMule 2.3.3 的 partfile tag 里没有真正的添加时间字段（EC_TAG_PARTFILE_* 全表
+        核对过，最接近的 EC_TAG_PARTFILE_LAST_RECV 其实是 GetLastChangeDatetime()，
+        会跟着传输一直往后跳），所以只能由面板自己记：第一次见到就写下来，
+        之后一直沿用。记在 <var_dir>/added.json，面板重启后不会重置。
+        """
+        key = str(file_hash or "").strip().upper()
+        if len(key) != 32:
+            return 0
+        with self._lock:
+            records = self._added_records()
+            stamp = records.get(key)
+            if stamp:
+                return int(stamp)
+            try:
+                stamp = int(now if now is not None else time.time())
+            except (TypeError, ValueError):
+                stamp = int(time.time())
+            records[key] = stamp
+            if len(records) > ADDED_RECORDS_MAX:
+                # 兜底：真的堆到上限就按时间丢最旧的一批，不让文件无限长
+                ordered = sorted(records.items(), key=lambda item: item[1])
+                for old_key, _stamp in ordered[:len(records) - ADDED_RECORDS_MAX]:
+                    records.pop(old_key, None)
+            # 落盘失败不能连累调用方：时间戳照样返回，只是这次没记住
+            self._save_added_records(records)
+            return stamp
+
+    def forget_added(self, hashes):
+        """任务被删除时把它的 hash 从记录里移除，返回实际清掉的条数。"""
+        if isinstance(hashes, str):
+            hashes = [hashes]
+        with self._lock:
+            records = self._added_records()
+            removed = 0
+            for value in hashes or []:
+                key = str(value or "").strip().upper()
+                if records.pop(key, None) is not None:
+                    removed += 1
+            if removed:
+                self._save_added_records(records)
+            return removed
+
+    def added_records(self):
+        """当前全部记录（调试/测试用，返回副本）。"""
+        with self._lock:
+            return dict(self._added_records())
+
+    def _added_records(self):
+        """懒加载 added.json；文件缺失/损坏一律当空记录（不能让列表接口挂掉）。"""
+        if self._added is None:
+            self._added = self._read_added_records()
+        return self._added
+
+    def _read_added_records(self):
+        try:
+            with open(self.added_path, "r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        out = {}
+        for key, value in raw.items():
+            text = str(key or "").strip().upper()
+            if len(text) != 32:
+                continue
+            try:
+                stamp = int(value)
+            except (TypeError, ValueError):
+                continue
+            if stamp > 0:
+                out[text] = stamp
+        return out
+
+    def _save_added_records(self, records):
+        """原子写：临时文件 -> os.replace，与 settings.json 同一套写法；失败只记日志。"""
+        try:
+            os.makedirs(self.var_dir, exist_ok=True)
+            tmp = self.added_path + ".tmp"
+            payload = json.dumps(records, ensure_ascii=False, indent=1, sort_keys=True)
+            with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(payload)
+                handle.flush()
+                try:
+                    os.fsync(handle.fileno())
+                except OSError:
+                    pass
+            os.replace(tmp, self.added_path)
+            return True
+        except (OSError, TypeError, ValueError) as exc:
+            self.log("added.json 写入失败：%s" % (exc,), level="warn")
+            return False
 
     # -- 备份 ---------------------------------------------------------------
     def backup_name(self, tag="manual"):

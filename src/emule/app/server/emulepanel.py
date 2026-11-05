@@ -271,6 +271,10 @@ class UpdateChecker(object):
         self._lock = threading.Lock()
         self._cache = {"at": 0.0, "payload": None}
         self._fail = {"at": 0.0, "payload": None}
+        # 上一次实际走通的来源（api / atom）。REST API 在家用宽带出口上常年 403，
+        # 回退 atom 是预期内的正常路径，不该每次检查都往 panel.log 里记一条 warn；
+        # 只有「这次从 api 掉到 atom」或「从 atom 恢复回 api」才值得留痕。
+        self._last_source = ""
 
     def repo(self):
         cfg = self.store.section("update")
@@ -372,6 +376,29 @@ class UpdateChecker(object):
             })
         return assets
 
+    def _note_source_recovered(self, source):
+        """来源回到 REST API 时记一条 info，让「已经恢复了」这件事在日志里留痕。"""
+        source = str(source or "")
+        if source != "api" or self._last_source != "atom":
+            if source:
+                self._last_source = source
+            return
+        self._last_source = source
+        RT.log("GitHub API 已恢复，版本检查改回 REST API", level="info")
+
+    def _note_api_fallback(self, error):
+        """REST API 不可用时切到 atom：只在「来源状态切换」时记一条 info。
+
+        API 被限流（403/429）时退回 releases.atom 是设计内的正常降级，回退和缓存
+        都实测有效；每 60 分钟一条 warn 会把真正的告警淹掉（实测 46/49 条 warn
+        都是它）。所以这里降成 info，并且连续走 atom 时不重复记 —— 只有这一次
+        是「从 api 切过来」或「从 atom 恢复后再次掉下来」才留一行。
+        """
+        if self._last_source == "atom":
+            return
+        self._last_source = "atom"
+        RT.log("GitHub API 不可用（%s），本次改用 releases.atom" % error, level="info")
+
     def check(self, force=False):
         now = time.time()
         with self._lock:
@@ -399,7 +426,7 @@ class UpdateChecker(object):
                     self._cache.update({"at": now, "payload": dict(payload)})
                 self._remember(payload)
                 return payload
-            RT.log("GitHub API 不可用（%s），改用 releases.atom" % first_error, level="warn")
+            self._note_api_fallback(first_error)
         if release is None:
             try:
                 release = self._from_atom(repo)
@@ -445,6 +472,7 @@ class UpdateChecker(object):
             "checked_at": int(now),
             "cached": False,
         }
+        self._note_source_recovered(payload.get("source"))
         with self._lock:
             self._cache.update({"at": now, "payload": dict(payload)})
         self._remember(payload)

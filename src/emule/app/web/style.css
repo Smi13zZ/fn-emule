@@ -872,6 +872,10 @@ canvas { display: block; width: 100%; height: 100%; }
 .lvlbadge.info { background: color-mix(in srgb, var(--dl) 12%, transparent); color: var(--dl); }
 .logbox { font-family: var(--mono); font-size: 12px; }
 .logline .m { min-width: 0; overflow-wrap: anywhere; }
+/* 概览页的日志行没有级别徽标，时间和正文直接相邻，不给间距就会渲染成
+   "17:41:44Key: 4219"。只对紧跟在时间后面的正文补左边距：日志页中间隔着
+   徽标时这条选择器不命中，间距仍旧由徽标的 margin-right 提供，不会叠加。 */
+.logline .t + .m { margin-left: 12px; }
 
 /* ---------------- settings save bar ---------------- */
 .savebar {
@@ -1072,6 +1076,9 @@ canvas { display: block; width: 100%; height: 100%; }
   }
   .logline .lvlbadge { order: 2; flex: 0 0 auto; white-space: nowrap; margin-left: 10px; margin-right: 0; }
   .logline .m { order: 3; flex: 1 1 100%; word-break: break-word; overflow-wrap: anywhere; margin-top: 2px; }
+  /* 正文在手机上换到第二行独占整行，桌面那条「紧跟时间」的左边距在此处会变成
+     缩进，清零。 */
+  .logline .t + .m { margin-left: 0; }
   .logline .t .d { color: var(--dim); }
   .logline .t .h { color: var(--faint); }
 

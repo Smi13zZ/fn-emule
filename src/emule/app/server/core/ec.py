@@ -42,6 +42,13 @@ DEFAULT_TIMEOUT = 10.0
 LONG_TIMEOUT = 12.0
 DEFAULT_CLIENT_NAME = "fn-emule-panel"
 
+#: 增量更新缓存里一条客户端/服务器多久没被任何一次回包提到就丢弃（秒）。
+#: aMule 只在「这一轮有变化」时才把条目放进回包，所以没出现不等于消失。
+#: 取 900 秒：排队中的来源可能十几分钟都没有状态变化（一直等位），
+#: 存活期太短会把它误判成断开、来源数来回跳；确实断开的来源最终也会被清掉，
+#: 只是晚一些——列表多留一条陈旧来源，远比显示不全要好。
+_UPDATE_CACHE_TTL = 900.0
+
 
 class EmuleError(Exception):
     """EC 层错误，消息一律是可直接展示给用户的中文原因。"""
@@ -994,11 +1001,20 @@ def client_record(tag):
 
 
 def server_record(tag):
-    """CEC_Server_Tag；FULL 细节级别下 IP/端口在 tag 自身的 IPv4 数据里。"""
-    ip, port = tag.ip()
-    if not ip:
-        ip = uint32_to_ip(tag.child_value(Tag.SERVER_IP))
+    """CEC_Server_Tag。两种形态：
+
+    * FULL/WEB 细节级别：IP/端口编码在 tag 自身的 IPv4 数据里；
+    * 增量更新包（CEC_Server_Tag + valuemap）：tag 自身数据是 ECID，IP/端口是
+      EC_TAG_SERVER_IP / EC_TAG_SERVER_PORT 两个整数子 tag。
+
+    所以先看有没有 SERVER_IP 子 tag —— 否则会把这个 uint32 的 ECID 当成 IPv4 解出来。
+    """
+    ip_tag = tag.get(Tag.SERVER_IP)
+    if ip_tag is not None:
+        ip = uint32_to_ip(ip_tag.int())
         port = tag.child_value(Tag.SERVER_PORT)
+    else:
+        ip, port = tag.ip()
     return {
         "ecid": tag.int(),
         "ip": ip,
@@ -1014,6 +1030,51 @@ def server_record(tag):
         "maxusers": tag.child_value(Tag.SERVER_USERS_MAX),
         "files": tag.child_value(Tag.SERVER_FILES),
     }
+
+
+def _filled_fields(record):
+    """从一条记录里挑出「这次真的带了值」的字段。
+
+    aMule 的增量回包里，同一个客户端有时只带几个变化的字段
+    （实测常见的是 CLIENT_DOWN_SPEED / CLIENT_DOWNLOAD_TOTAL / CLIENT_QT_RANGES）。
+    这种 tag 直接覆盖完整记录会把名字、IP 抹成空 —— 表现为来源列表里出现
+    「一行没有 IP」的条目。所以只把非空字段合并进缓存里那份完整记录。
+
+    注意 0 与空串都当「没带」：这些字段（速度、队列名次、状态）真实值本来
+    就可能是 0，宁可保留旧值，也不要让一次部分更新把有效信息清空。
+    """
+    filled = {}
+    for key, value in (record or {}).items():
+        if value is None or value == "" or value == [] or value == 0:
+            continue
+        filled[key] = value
+    return filled
+
+
+def _update_client_child_tags(container):
+    """增量更新包里的 CLIENT 容器 → 客户端 tag 列表（原始 tag，交给缓存层解析）。
+
+    顶层 CLIENT 是 CECEmptyTag 容器（只带名字，任何字段都没有），每个真实的
+    CEC_UpDownClient_Tag 是它的子节点。这里保持"原样返回子节点"，因为调用方还需要
+    区分「带字段的全量 tag」和「只有 ECID 的增量存根」，这是缓存层才能判断的。
+    老形态（顶层 CLIENT 自己就带字段、没有容器这一层）照样收下。
+    """
+    children = [child for child in container.children if child.name == Tag.CLIENT]
+    if children:
+        return children
+    if container.get(Tag.CLIENT_NAME) is not None or not container.children:
+        return [container] if container.get(Tag.CLIENT_NAME) is not None else []
+    return []
+
+
+def _update_server_child_tags(container):
+    """增量更新包里的 SERVER 容器 → 服务器 tag 列表（理由同 _update_client_child_tags）。"""
+    children = [child for child in container.children if child.name == Tag.SERVER]
+    if children:
+        return children
+    if container.get(Tag.SERVER_NAME) is not None or container.get(Tag.SERVER_IP) is not None:
+        return [container]
+    return []
 
 
 def search_record(tag):
@@ -1186,6 +1247,10 @@ class ECClient(object):
         self._inbox = queue.Queue()
         self._lock = threading.RLock()
         self._closed = False
+        # EC_OP_GET_UPDATE 是「按连接」增量的：同一条连接上第一次回全量，
+        # 之后只回 ECID 存根（tag 没有子节点）。所以这里按 ECID 累积上一次的全量结果，
+        # 每次请求用当次响应里出现过的 ECID 做一次收敛，连接重建时整体清空。
+        self._update_cache = {"files": {}, "clients": {}, "servers": {}}
 
     # -- 连接管理 -----------------------------------------------------
     @property
@@ -1241,6 +1306,9 @@ class ECClient(object):
 
     def _open(self):
         self._closed = False
+        # 新连接意味着 aMule 那边的增量 tagmap 从头开始，本地累积必须一起清掉，
+        # 否则会把上一条连接见过、这次根本没出现的客户端当成本次结果。
+        self._update_cache = {"files": {}, "clients": {}, "servers": {}}
         while not self._inbox.empty():          # 丢掉上次会话的残留包
             try:
                 self._inbox.get_nowait()
@@ -1277,10 +1345,24 @@ class ECClient(object):
 
     @staticmethod
     def _recv_exact(sock, count):
+        """从 socket 读满 count 字节。
+
+        **读线程不能用 socket 超时判断断线**：这条连接是长连接，两次请求之间
+        空闲几十秒很正常，而 sock 的 timeout 是给「等请求回包」设的（默认 10 秒）。
+        早先这里把 socket.timeout 当成断线，空闲 10 秒读线程就退出，下一次请求
+        先撞上一个「连接已断」的哨兵再重连 —— 表现为面板每 10 秒重连一次引擎，
+        按连接累积的增量缓存也跟着每 10 秒清空一次。
+        所以超时只是「现在还没数据」，继续等；只有 recv 返回空才是真断开。
+        """
         chunks = []
         remaining = count
         while remaining > 0:
-            chunk = sock.recv(remaining)
+            try:
+                chunk = sock.recv(remaining)
+            except socket.timeout:
+                continue
+            except OSError as exc:
+                raise EmuleOffline("EC 连接中断：%s" % exc)
             if not chunk:
                 raise EmuleOffline("EC 连接已被 aMule 关闭")
             chunks.append(chunk)
@@ -1428,18 +1510,77 @@ class ECClient(object):
 
         客户端 tag 带 EC_TAG_CLIENT_REQUEST_FILE，可据此把下载来源归属到具体文件；
         tag 自身数据是 ECID（而不是 IPv4），因此也是服务器 ECID 的唯一来源。
+
+        **detail 必须用 INC_UPDATE，不能换成其它级别。** ExternalConn.cpp 的
+        EC_OP_GET_UPDATE 分支只在 detail == EC_DETAIL_INC_UPDATE 时装配回包，其它级别下
+        response 保持 NULL，于是走到包末尾的 wxFAIL（invalid opcode received: 0x52）——
+        amuled 在 wx 断言后会断开这条 EC 连接，面板后续请求全部失败。
+
+        回包结构是**两层**：顶层的 CLIENT / SERVER 只是空容器（CECEmptyTag，自身没有
+        CLIENT_NAME 之类的字段），真正的客户端节点挂在容器的 children 里，CLIENT_NAME
+        还再往下一层。所以必须遍历容器子节点逐个解析，不能拿顶层容器去判断。
         """
         packet = self.request(Op.GET_UPDATE, detail=Detail.INC_UPDATE)
-        files, clients, servers = [], [], []
+        files, client_tags, server_tags = [], [], []
         for tag in packet.children:
             if tag.name == Tag.PARTFILE:
                 files.append(partfile_record(tag))
             elif tag.name == Tag.CLIENT:
-                if tag.children and tag.get(Tag.CLIENT_NAME) is not None:
-                    clients.append(client_record(tag))
+                client_tags.extend(_update_client_child_tags(tag))
             elif tag.name == Tag.SERVER:
-                servers.append(server_record(tag))
+                server_tags.extend(_update_server_child_tags(tag))
+        # 文件每次请求都带最新状态，直接用；客户端与服务器是增量的，走按连接累积。
+        clients = self._merge_update_cache("clients", client_tags, client_record)
+        servers = self._merge_update_cache("servers", server_tags, server_record)
         return {"files": files, "clients": clients, "servers": servers}
+
+    def _merge_update_cache(self, kind, tags, build):
+        """把这次的增量 tag 合并进按连接累积的缓存，返回该类的完整当前快照。
+
+        aMule 的增量语义（实测）：同一条连接上第一次回全量，之后每次只回
+        **这一轮有变化的**条目 —— 带字段的是更新，只带 ECID 存根的是「这个编号
+        还在，但字段没变」。所以：
+          * 带字段的 tag → 解析后刷新缓存；
+          * 存根 → 保留缓存里那份，只续一下存活时间；
+          * **本次没出现的绝不能删** —— 没出现只表示这一轮没变化，
+            当成「消失了」会把大部分来源误删（实测 4 条来源会掉成 1 条）。
+        真正失效的条目靠存活超时清理，见 _UPDATE_CACHE_TTL。
+        """
+        cache = self._update_cache.get(kind)
+        if cache is None:
+            cache = self._update_cache[kind] = {}
+        now = time.monotonic()
+        for tag in tags or []:
+            children = getattr(tag, "children", None) or []
+            if children:
+                ecid = int(build(tag).get("ecid") or 0) or int(tag.int() or 0)
+                if not ecid:
+                    continue
+                # aMule 的回包有三种形态：全量（几十个字段）、部分更新（只有速度 /
+                # 已下载 / 队列名次这几个）、以及只有 ECID 的存根。部分更新**不是**
+                # 完整记录，直接覆盖会把名字和 IP 抹掉（实测来源会变成「一行没有 IP」）。
+                # 所以按字段合并：这次给了哪些字段就更新哪些，没给的沿用旧值。
+                patch = _filled_fields(build(tag))
+                entry = cache.get(ecid)
+                if entry is None:
+                    # 第一次见到：至少是有字段的 tag，照常建一条
+                    cache[ecid] = {"record": build(tag), "seen": now}
+                    continue
+                record = dict(entry["record"])
+                record.update(patch)
+                entry["record"] = record
+                entry["seen"] = now
+                continue
+            ecid = tag.int()
+            if ecid is None:
+                continue
+            entry = cache.get(int(ecid))
+            if entry is not None:
+                entry["seen"] = now
+        for ecid in [key for key, entry in cache.items()
+                     if now - entry["seen"] > _UPDATE_CACHE_TTL]:
+            del cache[ecid]
+        return [entry["record"] for entry in cache.values()]
 
     # -- 下载任务 -----------------------------------------------------
     def add_link(self, link, category=None):

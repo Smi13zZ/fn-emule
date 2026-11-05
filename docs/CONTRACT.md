@@ -69,15 +69,19 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 ```
 /var/apps/fn-emule/var/                 TRIM_PKGVAR
   settings.json                          面板设置（含 aMule 偏好、通知、备份配置）
-  amule/                                 aMule 配置目录（amule.conf / server.met / nodes.dat / Temp / Incoming）
-  panel.log  amuled.log
+  amule/                                 aMule 配置目录（amule.conf / server.met / nodes.dat）
+  panel.log  amuled.log                  面板日志／引擎日志（各自按大小轮转，各留一份 .1）
+  added.json                             每个任务第一次出现在下载列表的时刻（任务删除时清理）
   runtime-ports.env                      BACKEND_PORT/ADMIN_TARGET_PORT/EC_PORT
   panel.pid  amuled.pid
-  backups/
+  backups/  deleted/                     配置备份／删除任务时保留的分块数据
 /var/apps/fn-emule/shares/fn-emule/     用户可见共享目录（data-share）
   Incoming/    下载完成目录（默认）
-  Temp/        临时分块目录（默认）
+  Temp/        临时分块目录（默认；下载中的 NNN.part 与 .part.met 在这里，不在 var/amule/Temp）
 ```
+
+> 真实目录路径以 `GET /api/prefs` 返回的 `incoming_dir` / `temp_dir` 为准，
+> 用户可以在设置里改到别的共享目录；上表是默认值。
 
 ## 3. HTTP API 契约
 

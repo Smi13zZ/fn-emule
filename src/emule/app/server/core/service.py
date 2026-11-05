@@ -424,12 +424,180 @@ _LOG_LEVEL_PREFIX = re.compile(r"^(error|warning|warn|critical|严重错误|错�
 _ERROR_WORDS = ("error", "failed", "failure", "fatal", "critical", "错误", "失败", "异常")
 _WARN_WORDS = ("warn", "警告", "警告：", "deprecated")
 
+#: aMule 的 UPnP 事件头。路由器每推一次 IGD 事件，aMule 就写 8 行（这个头 +
+#: SID + Key + Property list + 4 条属性），单次事件 490 字节。实测占 amuled.log
+#: 的 96%，把日志页的可见窗口压到十分钟，概览的「最近日志」6 条全是它。
+#: 日志级别由引擎决定、面板改不了，所以只能在读日志时把明细折成一行摘要。
+_UPNP_EVENT_HEAD = "Universal Plug and Play: UPNP_EVENT_RECEIVED:"
+#: 允许折叠的明细行形状。只有严格命中这几种形状的行才折叠，
+#: 形状不像明细的行一律原样保留——宁可少折叠，也不能吞掉有效日志。
+_UPNP_BODY_RES = (
+    re.compile(r"^\s+SID:\s*\S+\s*$"),
+    re.compile(r"^\s+Key:\s*\d+\s*$"),
+    re.compile(r"^\s+Property list:\s*$"),
+    re.compile(r"^\s+[A-Za-z][A-Za-z0-9_]*='[^']*'\s*$"),
+)
+#: 单次事件最多折叠多少行明细。超出就停手，剩下的交回主循环，
+#: 免得一条病态日志把后面的内容整段吃掉。
+_UPNP_MAX_BODY_LINES = 12
+#: 引擎没起来时回退读 amuled.log 尾部。折叠后 8 行原始日志才出 1 条，
+#: 所以读的窗口要按实际折叠后的条目数逐步放大，直到凑够 limit 条或撞到上限。
+#: 上限压在 20000 行（约 4MB）：实测 5 万行解析 0.16 秒，这个量级不会拖慢
+#: /api/log 的 6 秒预算，也足够让 1000 条覆盖半小时以上。
+_LOG_FILE_MIN_LINES = 1024
+_LOG_FILE_MAX_LINES = 20000
+#: 摘要里优先展示的属性（按此顺序），其余属性按出现顺序补在后头
+_UPNP_SUMMARY_KEYS = ("ConnectionStatus", "ExternalIPAddress",
+                      "PortMappingNumberOfEntries", "PossibleConnectionTypes")
+_UPNP_SUMMARY_MAX_KEYS = 3
+_UPNP_VALUE_MAX_CHARS = 40
+
+
+def _upnp_detail_text(line):
+    """把一行还原成 UPnP 明细行的正文；不是明细行返回空串。
+
+    日志行前面带着 "!YYYY-mm-dd HH:MM:SS: "，明细行的形状要在去掉这段之后再认，
+    而且**只认下面这几种严格形状**：SID / Key / Property list / 单引号键值对。
+    形状对不上一律返回空串，交回主循环按普通日志处理。
+    """
+    text = (line or "").rstrip()
+    if not text:
+        return ""
+    match = _LOG_LINE.match(text)
+    if match:
+        text = match.group(2)
+    else:
+        text = text.lstrip("!")
+    for pattern in _UPNP_BODY_RES:
+        if pattern.match(text):
+            return text
+    return ""
+
+
+def _upnp_property_pair(text):
+    """从 "        ExternalIPAddress='1.2.3.4'" 抠出 (键, 值)；不是属性行返回 ("", "")。"""
+    match = re.match(r"^\s+([A-Za-z][A-Za-z0-9_]*)='([^']*)'\s*$", text)
+    if not match:
+        return "", ""
+    return match.group(1), match.group(2)
+
+
+def _parse_log_line(line):
+    """解析一行原始日志 → (本行时间戳或 None, 级别, 正文)；空行返回 None。
+
+    本行没有时间戳（多行消息的续行、引擎直接打的内容）时时间戳返回 None，
+    「沿用上一行时间」由调用方 _parse_log_lines 负责。
+    级别判定用 _ERROR_WORDS / _WARN_WORDS 做子串匹配，与原实现保持一致。
+    """
+    parsed = _parse_log_line_parts(line)
+    if parsed is None:
+        return None
+    stamp, text = parsed
+    stamp_ts = None
+    if stamp:
+        try:
+            stamp_ts = int(time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")))
+        except ValueError:
+            stamp_ts = None
+    level = "info"
+    lowered = text.lower()
+    prefix = _LOG_LEVEL_PREFIX.match(text)
+    if prefix:
+        text = prefix.group(2)
+        lowered = text.lower()
+    if any(word in lowered for word in _ERROR_WORDS):
+        level = "error"
+    elif any(word in lowered for word in _WARN_WORDS):
+        level = "warn"
+    return stamp_ts, level, text
+
+
+def _parse_log_line_parts(line):
+    """拆掉 "!YYYY-mm-dd HH:MM:SS: " 前缀 → (时间戳字符串或空, 正文)；空行返回 None。"""
+    line = (line or "").rstrip()
+    if not line:
+        return None
+    match = _LOG_LINE.match(line)
+    if match:
+        return match.group(1), match.group(2)
+    return "", line
+
+
+def _log_line_level(line):
+    """只给一行判级别，不关心时间戳与正文。"""
+    parsed = _parse_log_line(line)
+    return parsed[1] if parsed is not None else "info"
+
+
+def _collect_upnp_details(lines, start):
+    """从 lines[start] 起收集一条 UPnP 事件的明细行。
+
+    返回 (属性字典, 消费的行数)。只要遇到第一条**不**符合明细形状的行就立刻停手，
+    那一条和它后面的内容全部交回主循环——真正的 error/warning 行一行都不会被吞掉。
+
+    明细里只要有一行的级别不是 info（例如属性值里带 "error"、"failed" 这类字样
+    被判成了 error），就把整块原样交回主循环：摘要只呈现 info 级明细，
+    遇到带级别的明细宁可完全不折叠，也不替用户改写它的级别。
+    """
+    properties = {}
+    consumed = 0
+    total = len(lines)
+    while start + consumed < total and consumed < _UPNP_MAX_BODY_LINES:
+        line = lines[start + consumed]
+        if not isinstance(line, str):
+            break
+        detail = _upnp_detail_text(line)
+        if not detail:
+            break
+        if _log_line_level(line) != "info":
+            return {}, 0
+        key, value = _upnp_property_pair(detail)
+        if key:
+            properties[key] = value
+        consumed += 1
+    return properties, consumed
+
+
+def _upnp_summary_text(properties):
+    """把一条 UPnP 事件收集到的属性拼成一行摘要。"""
+    keys = [key for key in _UPNP_SUMMARY_KEYS if key in properties]
+    keys.extend(key for key in properties if key not in _UPNP_SUMMARY_KEYS)
+    parts = []
+    for key in keys[:_UPNP_SUMMARY_MAX_KEYS]:
+        value = properties[key]
+        if len(value) > _UPNP_VALUE_MAX_CHARS:
+            value = value[:_UPNP_VALUE_MAX_CHARS] + "…"
+        parts.append("%s=%s" % (key, value))
+    if not parts:
+        return "%s 网关状态事件（明细已折叠）" % _UPNP_EVENT_HEAD
+    return "%s 网关状态事件（%s）" % (_UPNP_EVENT_HEAD, " / ".join(parts))
+
+
+def _bump_upnp_summary(entry):
+    """把一条已经存在的 UPnP 摘要标记为「又来了一次」，正文只加计数后缀。
+
+    网关状态没变时 aMule 每分钟会推好几次同样的事件，折叠成摘要后仍然一模一样。
+    连续重复只保留第一条，正文末尾缀上「同上 ×N」，第 N 次的时刻不再单独占一行。
+    """
+    base = entry.get("_upnp_base") or entry["text"]
+    count = int(entry.get("_upnp_count") or 1) + 1
+    entry["_upnp_base"] = base
+    entry["_upnp_count"] = count
+    entry["text"] = "%s（连续 %d 次）" % (base, count)
+
+
+def _strip_upnp_markers(entry):
+    """把折叠去重用的内部字段摘掉，只留 {t, level, text}。"""
+    entry.pop("_upnp_base", None)
+    entry.pop("_upnp_count", None)
+    return entry
+
 
 class EmuleService(object):
     """引擎门面：进程控制 + EC 数据读写 + 面板需要的所有领域视图。"""
 
     def __init__(self, settings_provider, var_dir=None, runtime_dir=None, config_dir=None,
-                 client=None):
+                 client=None, store=None):
         self._settings_provider = settings_provider or (lambda: {})
         self.module_dir = os.path.dirname(os.path.abspath(__file__))
         self.var_dir = os.path.abspath(var_dir) if var_dir else default_var_dir()
@@ -451,6 +619,9 @@ class EmuleService(object):
         # 后台补齐引导文件的线程与结果说明
         self._bg_thread = None
         self._bg_notes = []
+        # 持久层：只用来读写 var/added.json（添加时间）。没传入就按 var_dir 自建一个，
+        # 这样单测 / 其它调用方也能用到同一份记录，不必强依赖 panel 的 Store 实例。
+        self._added_store_ref = store
 
     # ------------------------------------------------------------ 设置
     def _settings(self):
@@ -464,6 +635,34 @@ class EmuleService(object):
 
     def _engine_settings(self):
         return self._ctl.settings()
+
+    def _added_store(self):
+        """添加时间的持久层；传了 panel 的 Store 就复用，否则按 var_dir 自建一个。
+
+        只用到 Store 里与 added.json 相关的那几个方法，所以这里用鸭子类型即可 ——
+        core 不该反向依赖 panel 的装配顺序。
+        """
+        store = self._added_store_ref
+        if store is not None:
+            return store
+        storemod = None
+        try:
+            import store as storemod            # panel 把 server/ 放进了 sys.path
+        except ImportError:
+            try:
+                from .. import store as storemod     # type: ignore  # core 作为包导入时
+            except ImportError:
+                storemod = None
+        if storemod is None:
+            return None                          # 没有持久层就退化成"不记"，不影响出列表
+        # 这里只需要它的路径与 added.json 读写，构造时不读盘、不写盘
+        store = storemod.Store(self.var_dir, share_dir=self._share_dir_hint())
+        self._added_store_ref = store
+        return store
+
+    def _share_dir_hint(self):
+        """var 目录的兄弟 shares/fn-emule（与 Store._guess_share_dir 同一规则）。"""
+        return os.path.join(os.path.dirname(self.var_dir), "shares", "fn-emule")
 
 
     # ------------------------------------------------------------ 连接
@@ -756,6 +955,25 @@ class EmuleService(object):
             return "auto"
         return _PRIORITY_BY_CODE.get(raw, "normal")
 
+    def _added_time(self, record):
+        """添加时间：面板首次见到这个 hash 的时刻（aMule 没有这个字段，只能自己记）。
+
+        EC_TAG_PARTFILE_LAST_RECV 的值是 CPartFile::GetLastChangeDatetime()，会随传输
+        一直往后跳，当前端「添加时间」用既显示成“刚刚”、还会让默认按 added 排序的列表
+        一直抖动。所以改读 <var_dir>/added.json 里记下的首次见到的时刻。
+        读写失败一律退化成“现在”，保证列表照常返回。
+        """
+        file_hash = str(record.get("hash") or "").strip().upper()
+        if len(file_hash) != 32:
+            return 0
+        try:
+            store = self._added_store()
+            if store is not None:
+                return int(store.added_time(file_hash))
+        except Exception:                            # noqa: BLE001 - 记录坏了不能拖垮列表
+            pass
+        return int(time.time())
+
     def _download_item(self, record):
         """EC partfile 记录 → CONTRACT §3 的下载 item。"""
         size = int(record.get("size") or 0)
@@ -781,7 +999,7 @@ class EmuleService(object):
             "priority": self._priority_name(int(record.get("prio_raw") or 0)),
             "category": str(record.get("category") or ""),
             "partfile": True,
-            "added": int(record.get("last_recv") or 0),
+            "added": self._added_time(record),
             "sources": {
                 "total": int(record.get("source_total") or 0),
                 "transferring": int(record.get("source_xfer") or 0),
@@ -981,6 +1199,7 @@ class EmuleService(object):
             client.partfile_command(Op.PARTFILE_RESUME, file_hash)
         elif action in ("cancel", "delete", "remove"):
             client.partfile_command(Op.PARTFILE_DELETE, file_hash)
+            self._forget_added([file_hash])          # 任务没了，添加时间记录也一并清掉
         elif action in ("stop",):
             client.partfile_command(Op.PARTFILE_STOP, file_hash)
         elif action in ("priority", "prio", "set_priority"):
@@ -1033,18 +1252,36 @@ class EmuleService(object):
                 records[key] = record
         results = []
         ok_all = True
+        deleted = []
         for file_hash in cleaned:
             try:
                 kept = self._delete_one(client, file_hash, records.get(file_hash),
                                         temp_dir, var_dir, delete_data)
                 results.append({"hash": file_hash, "ok": True, "error": "", "kept": kept})
+                deleted.append(file_hash)
             except (EmuleOffline, EmuleTimeout):
                 raise                       # 引擎掉线/超时是整体故障，不要伪装成"这一条失败"
             except EmuleError as exc:
                 ok_all = False
                 results.append({"hash": file_hash, "ok": False, "error": str(exc), "kept": ""})
+        self._forget_added(deleted)
         return {"ok": ok_all, "action": "delete", "delete_data": delete_data,
                 "count": len(results), "results": results}
+
+    def _forget_added(self, hashes):
+        """任务真删掉了才把添加时间记录一并移除，避免 added.json 无限增长。"""
+        if not hashes:
+            return
+        try:
+            store = self._added_store()
+            if store is None:
+                return
+            store.forget_added(hashes)
+        except Exception as exc:                     # noqa: BLE001 - 清理失败不影响删除结果
+            try:
+                self._ctl._log("warn", "清理添加时间记录失败：%s" % (exc,))  # noqa: SLF001
+            except Exception:                        # noqa: BLE001
+                pass
 
     def _delete_one(self, client, file_hash, record, temp_dir, var_dir, delete_data):
         """单个 hash 的删除实现，返回保留目录路径（没有搬走任何文件时为空串）。"""
@@ -1674,21 +1911,52 @@ class EmuleService(object):
         return {"items": items, "total": len(items)}
 
     # ------------------------------------------------------------ 日志
-    def _log_file_lines(self, limit):
+    def _log_file_lines(self, count):
+        """读 amuled.log 尾部 count 行原始日志；读不到返回空列表。"""
         path = os.path.join(self.var_dir, "amuled.log")
+        count = max(1, int(count))
         try:
             with open(path, "rb") as handle:
                 handle.seek(0, os.SEEK_END)
                 size = handle.tell()
-                read_size = min(size, max(64 * 1024, limit * 256))
+                read_size = min(size, max(64 * 1024, count * 256))
                 handle.seek(max(0, size - read_size))
                 data = handle.read()
         except OSError:
             return []
         text = data.decode("utf-8", "replace")
-        return text.splitlines()[-limit:]
+        return text.splitlines()[-count:]
+
+    def _log_file_entries(self, limit):
+        """回退路径：从 amuled.log 尾部凑够 limit 条**折叠后**的条目。
+
+        折叠把 8 行原始日志并成 1 条，所以不能用「读 limit 行」的老办法，
+        否则请求 1000 条只能回一百多条。这里按折叠后的产出逐步放大窗口，
+        凑够就停：正常情况第一轮或第二轮就够，撞到 _LOG_FILE_MAX_LINES 才放弃。
+        窗口放大只影响「读多少」，「返回多少条」仍由 _parse_log_lines 的
+        条目数截断决定，语义与原来一致。
+        """
+        wanted = int(_clamp(limit, 1, 2000))
+        window = int(_clamp(wanted * 2, _LOG_FILE_MIN_LINES, _LOG_FILE_MAX_LINES))
+        while True:
+            lines = self._log_file_lines(window)
+            if not lines:
+                return []
+            entries = self._parse_log_lines(lines, wanted)
+            if len(entries) >= wanted or window >= _LOG_FILE_MAX_LINES:
+                return entries
+            window = int(min(window * 2, _LOG_FILE_MAX_LINES))
 
     def _parse_log_lines(self, lines, limit):
+        """原始日志行 → [{t, level, text}]，按条目数截断。
+
+        每行先剥掉 "!YYYY-mm-dd HH:MM:SS: " 前缀并更新当前时间戳，再判级别。
+        UPnP 事件块在这里折成一条摘要：头行保留（它本来就带着时间戳与级别），
+        紧随其后的明细行如果形状完全符合（SID / Key / Property list / X='Y'）
+        就并进摘要里；只要撞上一条形状不符的行就立刻停手，那一条照常按普通
+        日志处理——真 error/warning 行一行都不会被吞掉。
+        截断仍然发生在**折叠之后**按条目数切，语义与原来一致。
+        """
         # EC 的 EC_OP_GET_LOG 返回的是“整段日志”一个字符串，先按换行拆开
         expanded = []
         for line in lines or []:
@@ -1699,32 +1967,42 @@ class EmuleService(object):
         lines = expanded
         entries = []
         current_ts = int(time.time())
-        for line in lines:
+        index = 0
+        total = len(lines)
+        while index < total:
+            line = lines[index]
+            index += 1
+            if line is None:
+                continue
+            if not isinstance(line, str):
+                line = str(line)
             line = line.rstrip()
             if not line:
                 continue
-            match = _LOG_LINE.match(line)
-            if match:
-                stamp = match.group(1)
-                text = match.group(2)
-                try:
-                    current_ts = int(time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S")))
-                except ValueError:
-                    pass
-            else:
-                text = line
-            level = "info"
-            lowered = text.lower()
-            prefix = _LOG_LEVEL_PREFIX.match(text)
-            if prefix:
-                text = prefix.group(2)
-                lowered = text.lower()
-            if any(word in lowered for word in _ERROR_WORDS):
-                level = "error"
-            elif any(word in lowered for word in _WARN_WORDS):
-                level = "warn"
+            parsed = _parse_log_line(line)
+            if parsed is None:
+                continue
+            stamp_ts, level, text = parsed
+            # 没有时间戳的行（多行消息的续行、引擎直接打的内容）沿用上一行的时间
+            if stamp_ts is not None:
+                current_ts = stamp_ts
+            if level == "info" and text.strip().startswith(_UPNP_EVENT_HEAD):
+                properties, consumed = _collect_upnp_details(lines, index)
+                if consumed:
+                    index += consumed
+                    text = _upnp_summary_text(properties)
+                    # 网关状态没变时，aMule 会每分钟推好几次一模一样的事件。
+                    # 折叠后它们仍然占满「最近日志」的整屏，所以连续重复只留一条，
+                    # 用后缀记次数。只在 UPnP 摘要上做，普通日志一行不动。
+                    previous = entries[-1] if entries else None
+                    if (previous is not None and previous["level"] == level
+                            and previous["text"].startswith(text)):
+                        _bump_upnp_summary(previous)
+                        continue
+                # consumed == 0：明细形状对不上或带级别，头行原样留着，
+                # 不能改成「已折叠」的摘要——那样会让读者以为明细被收掉了。
             entries.append({"t": current_ts, "level": level, "text": text})
-        return entries[-limit:]
+        return [_strip_upnp_markers(entry) for entry in entries[-limit:]]
 
     def logs(self, limit=200):
         try:
@@ -1741,9 +2019,8 @@ class EmuleService(object):
         except EmuleError:
             lines = None
         if not lines:
-            lines = self._log_file_lines(limit)
-        entries = self._parse_log_lines(lines, limit)
-        return entries
+            return self._log_file_entries(limit)
+        return self._parse_log_lines(lines, limit)
 
     # ------------------------------------------------------------ 偏好
     def prefs(self):

@@ -39,6 +39,9 @@ WATCH_INTERVAL = 5.0
 BACKOFF = (3.0, 6.0, 12.0)
 #: 每小时最多自动重启次数
 MAX_RESTART_PER_HOUR = 5
+#: amuled.log 单文件上限。引擎自己不做轮转，实测一个月能涨到 100 MB 左右，
+#: 所以每次启动前查一次大小，超了就滚成 .1（只留一份，够排查即可）。
+AMULED_LOG_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _md5_hex(text):
@@ -546,6 +549,11 @@ class AmuleCtl(object):
             self.check_ports(settings)
             binary, _libdir = self.runtime_binary()
             env = self.env()
+            # 轮转必须赶在 Popen 之前：此刻磁盘上没有任何进程持有 amuled.log 的 fd，
+            # os.replace 是安全的。失败只影响日志大小，绝不能因此让引擎起不来。
+            if self.rotate_log_if_needed():
+                self._log("info", "amuled.log 超过 %d MB，已轮转为 %s.1"
+                          % (AMULED_LOG_MAX_BYTES // (1024 * 1024), self.log_file))
             try:
                 log_handle = open(self.log_file, "ab", buffering=0)
             except OSError as exc:
@@ -657,6 +665,26 @@ class AmuleCtl(object):
             pass
 
     # -- 日志 ---------------------------------------------------------
+    def rotate_log_if_needed(self):
+        """amuled.log 超过 AMULED_LOG_MAX_BYTES 就滚成 .1；返回是否真的滚了。
+
+        只能在 amuled **没在跑**的时候调用（start() 里已经确认过没有 pid）。
+        aMule 启动时自己 open("ab") 拿到 fd，之后一直写到进程退出；运行期间从外部
+        os.replace 只是把目录项换掉，旧 inode 仍被它的 fd 引用着，磁盘空间不释放，
+        排查起来反而更乱。
+
+        amuled.log 是引擎唯一的日志出口，轮转写坏了就等于引擎没有日志，所以这里
+        任何 OSError（文件不存在、权限不足、被占用）都只是「这次不轮转」，
+        绝不向调用方抛异常。
+        """
+        try:
+            if os.path.getsize(self.log_file) <= AMULED_LOG_MAX_BYTES:
+                return False
+            os.replace(self.log_file, self.log_file + ".1")
+            return True
+        except OSError:
+            return False
+
     def _log(self, level, message):
         line = "%s [%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), level, message)
         try:
