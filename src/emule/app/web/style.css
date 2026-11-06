@@ -635,8 +635,8 @@ input[type="number"] { -moz-appearance: textfield; }
 .vstext { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 180px; }
 .vstext b { font-size: 13.5px; font-weight: 600; }
 .vstext span { font-size: 12px; color: var(--dim); }
-/* 零高、整行宽的 flex 项：在需要折行的窄屏上强制换行，桌面上不参与布局。 */
-.vbreak { display: none; }
+/* 桌面端：这一层不参与布局，两个按钮直接作为 .vstatus 的 flex 项排在文字右边。 */
+.vactions { display: contents; }
 
 /* ---------------- settings switch rows / channels ---------------- */
 .swrow {
@@ -1068,13 +1068,12 @@ canvas { display: block; width: 100%; height: 100%; }
   .vstatus > .spacer { display: none; }
   .vsic { order: 1; }
   .vstext { flex: 1 1 0; order: 2; min-width: 0; }
-  /* 按钮单独占下一整行。这里不能用零高占位元素断行（order 相同的
-     flex 项仍会被 flex-wrap 塞进当前行），直接把按钮的 basis 设成 100%
-     才会强制换行；两个按钮各 100% 会各占一行，所以有「立即更新」时
-     改回 0 让它们并排。 */
-  .vstatus .vbreak { display: none; }
-  .vstatus .btn.sm { order: 3; flex: 1 1 100%; min-width: 0; }
-  .vstatus .btn.sm + .btn.sm { flex: 1 1 0; }
+  /* 按钮组独占下一整行：这一层用 flex-basis:100% 强制换行，
+     内部再把两个按钮左右均分。只有一个按钮（已是最新版本）时它拉满整行。 */
+  .vstatus .vactions {
+    display: flex; order: 3; flex: 0 0 100%; gap: 8px; min-width: 0;
+  }
+  .vstatus .vactions .btn { flex: 1 1 0; min-width: 0; }
   .chrow .btn { flex: 1 1 auto; }
   .chrow { gap: 6px; }
   .chrow .spacer { display: none; }

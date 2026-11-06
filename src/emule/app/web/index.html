@@ -1395,13 +1395,16 @@
               <span>{{ updateNew ? t('settings.update.newSub') : t('settings.update.upSub') }}</span>
             </div>
             <div class="spacer"></div>
-            <i class="vbreak" aria-hidden="true"></i>
-            <button class="btn sm" type="button" :disabled="updateChecking || updateInstalling" @click="checkUpdate(true)">
-              <span class="ic" v-html="ic('refresh')"></span>{{ updateChecking ? t('settings.update.checking') : t('settings.update.check') }}
-            </button>
-            <button class="btn sm primary" type="button" v-if="updateNew" :disabled="updateInstalling" @click="askInstallUpdate">
-              <span class="ic" v-html="ic('download')"></span>{{ updateInstalling ? t('settings.update.installing') : t('settings.update.install') }}
-            </button>
+            <!-- 两个按钮包一层：手机上这一层独占一行、内部左右均分，
+                 桌面上 display:contents 让按钮回到与文字同一行。 -->
+            <div class="vactions">
+              <button class="btn sm" type="button" :disabled="updateChecking || updateInstalling" @click="checkUpdate(true)">
+                <span class="ic" v-html="ic('refresh')"></span>{{ updateChecking ? t('settings.update.checking') : t('settings.update.check') }}
+              </button>
+              <button class="btn sm primary" type="button" v-if="updateNew" :disabled="updateInstalling" @click="askInstallUpdate">
+                <span class="ic" v-html="ic('download')"></span>{{ updateInstalling ? t('settings.update.installing') : t('settings.update.install') }}
+              </button>
+            </div>
           </div>
           <div class="hint" style="color:var(--danger);margin-top:10px" v-if="updateError">{{ updateError }}</div>
           <!-- 进度只在弹窗里显示：卡片再放一份会和遮罩下的弹窗视觉重复 -->
