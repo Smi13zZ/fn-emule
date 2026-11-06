@@ -118,6 +118,8 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 | GET | /api/notify | 通知通道与记录 |
 | POST | /api/notify/settings, /channel, /test | 通知配置 |
 | GET | /api/backup/status · POST /api/backup/run, /restore | 配置备份 |
+| GET | /api/maintenance/storage | 各目录占用 + 安装包清单 `{items,total,updates,updates_keep,current_version}` |
+| POST | /api/maintenance/cleanup | `{target: updates\|logs\|all, keep?, which?}` → `{removed,freed,results}` |
 | GET | /api/update/check · POST /api/update/install | GitHub Release 更新（未发布时优雅返回 no_release） |
 | — | 版本检查节奏 | 见 §3.3：进程内每小时自查一次，前端打开期间每 30 分钟刷新 |
 
@@ -163,6 +165,20 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 // GET /api/search/{id} → {"search_id":"...","progress":100,"done":true,
 //   "results":[{hash,name,size,sources,type,ext,percent,already}],"started_at":...}
 ```
+
+### 3.6 维护清理：引擎日志只能截断、当前版本包不能删（v26.11.45 新增）
+
+`POST /api/maintenance/cleanup` 的两个约束都由 aMule 的文件句柄决定，不是风格偏好：
+
+- **引擎日志在引擎运行中不能 unlink。** amuled 用 `open("ab")` 拿到的 fd 一直指着旧
+  inode，删掉目录项后磁盘空间仍被那个 fd 占着，用户看到的是"清了但没变小"。
+  运行中走 `open(path,"wb")` 把文件截成 0 字节，同一 inode 继续写，空间立即回收；
+  没在跑的时候才直接删文件。
+- **当前运行的版本包永不删除。** 包名是 `fn-emule-<version>-fnos-all.fpk`，文件名里含
+  运行版本号的一律保留，且不占 `keep` 名额 —— 真要回滚时它就是最可能需要的那一个。
+- `.part` 一律删（升级脚本只认 `.fpk`），但**更新任务正在下载时整体拒绝**（409），
+  否则下载线程会写到已删的文件上。
+- 所有删除前都过 `realpath`，只允许删 `updates/` 目录内的文件。
 
 ### 3.5 共享目录必须摊平后交给引擎（v26.11.44 新增）
 

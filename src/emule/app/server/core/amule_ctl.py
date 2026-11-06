@@ -741,6 +741,43 @@ class AmuleCtl(object):
             pass
 
     # -- 日志 ---------------------------------------------------------
+    def clear_log(self, include_backup=True):
+        """清空引擎日志。返回 {removed:[...], freed:字节}。
+
+        引擎正在跑的时候**不能 unlink amuled.log**：aMule 用 open("ab") 拿到的
+        fd 一直指着旧 inode，删掉目录项之后磁盘空间不释放，用户看到的就是
+        "清了但没变小"。所以运行中改成 truncate（把文件截成 0 字节），
+        同一个 inode 继续被写，日志从头开始、空间立刻回收。
+
+        没在跑就直接删文件（顺带删 .1），少一个空文件。
+        """
+        removed = []
+        freed = 0
+        paths = [self.log_file]
+        if include_backup:
+            paths.append(self.log_file + ".1")
+        running = bool(self.find_pid())
+        for path in paths:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            try:
+                if running and path == self.log_file:
+                    # 运行中：截断而不是删除，保住 inode
+                    with open(path, "wb"):
+                        pass
+                else:
+                    os.remove(path)
+                removed.append(os.path.basename(path))
+                freed += size
+            except OSError as exc:
+                self._log("warn", "清理引擎日志失败（%s）：%s" % (os.path.basename(path), exc))
+        if removed:
+            self._log("info", "清理引擎日志：%s（回收 %.1f MB）"
+                      % ("，".join(removed), freed / 1024.0 / 1024.0))
+        return {"removed": removed, "count": len(removed), "freed": freed}
+
     def rotate_log_if_needed(self):
         """amuled.log 超过 AMULED_LOG_MAX_BYTES 就滚成 .1；返回是否真的滚了。
 

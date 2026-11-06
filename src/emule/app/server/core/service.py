@@ -24,6 +24,10 @@ try:                                                  # 打包运行：core/ 作
     )
     from .amule_ctl import (AmuleCtl, random_password, expand_shared_dirs,
                             SHARED_SCAN_MAX_DIRS)
+    try:
+        from .store import UPDATES_KEEP
+    except ImportError:
+        UPDATES_KEEP = 2
     from . import bootstrap
 except ImportError:                                    # 开发/自测：core/ 直接进 sys.path
     from ec import (                                   # type: ignore
@@ -34,6 +38,10 @@ except ImportError:                                    # 开发/自测：core/ �
     )
     from amule_ctl import (AmuleCtl, random_password, expand_shared_dirs,   # type: ignore
                            SHARED_SCAN_MAX_DIRS)
+    try:
+        from store import UPDATES_KEEP                      # type: ignore
+    except ImportError:
+        UPDATES_KEEP = 2
     import bootstrap                                    # type: ignore
 
 
@@ -1783,6 +1791,42 @@ class EmuleService(object):
             "shared_dirs": len(engine.get("shared_dirs") or []),
             "scan_dirs": expanded,
         }
+
+    # ------------------------------------------------------------ 维护
+    def clear_logs(self, which="all"):
+        """清空日志。which = engine | panel | all。
+
+        引擎日志由 AmuleCtl 处理（运行中要 truncate 而不是 unlink，否则
+        aMule 手里那个 fd 会让磁盘空间继续被占着）。面板日志可以直接删。
+        返回删掉的文件名与回收字节数，由面板写进自己的日志。
+        """
+        which = str(which or "all").strip().lower()
+        if which not in ("engine", "panel", "all"):
+            raise EmuleError("不支持的日志类型：%s（支持 engine / panel / all）" % which)
+        removed = []
+        freed = 0
+        if which in ("engine", "all"):
+            engine = self._ctl.clear_log()
+            removed.extend(engine["removed"])
+            freed += int(engine["freed"])
+        if which in ("panel", "all"):
+            store = self._added_store()
+            if store is not None and hasattr(store, "clear_log"):
+                panel = store.clear_log("panel_all")
+                removed.extend(panel["removed"])
+        return {"ok": True, "removed": removed, "count": len(removed),
+                "freed": freed, "which": which}
+
+    def purge_updates(self, keep=None):
+        """清 updates/ 里的历史安装包（含所有半截 .part）。
+
+        "更新正在下载" 这个前置判断在 panel-api 那层做（它才拿得到
+        RT._update_task），这里只负责按文件清单删。
+        """
+        store = self._added_store()
+        if store is None or not hasattr(store, "purge_updates"):
+            raise EmuleError("存储层不支持清理更新包")
+        return store.purge_updates(keep if keep is not None else UPDATES_KEEP)
 
     def shared_scan_summary(self):
         """给共享页用的一行诊断：配置了几个根目录、实际摊平出多少个待扫目录。"""

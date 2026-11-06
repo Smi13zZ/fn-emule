@@ -2931,6 +2931,90 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": ok, "results": results, "sent": len(results)})
             return
 
+        # ---------------- 维护 / 存储 ----------------
+        if path == "/api/maintenance/storage":
+            self.require_method(method, "GET")
+            report = RT.store.storage_report()
+            updates = RT.store.updates_list()
+            current = ""
+            try:
+                current = str(RT.update_checker.check(force=False).get("current") or RT.version)
+            except Exception:                       # noqa: BLE001 - 版本查不到不影响存储页
+                current = RT.version
+            payload = dict(report)
+            payload["ok"] = True
+            payload["updates"] = updates
+            payload["updates_keep"] = int_or(RT.store.section("update").get("keep_packages"),
+                                             storemod.UPDATES_KEEP)
+            payload["current_version"] = current
+            self.send_json(payload)
+            return
+
+        if path == "/api/maintenance/cleanup":
+            self.require_method(method, "POST")
+            body = self.json_body()
+            target = str(body.get("target") or "").strip().lower()
+            results = {}
+            if target in ("updates", "all"):
+                # 更新正在下载时不能动 .part，否则下载线程会写到已删的文件上
+                with RT._update_lock:
+                    running = bool(RT._update_task.get("running"))
+                if running:
+                    self.fail(409, "正在下载更新包，请等下载完成后再清理")
+                    return
+                keep = body.get("keep")
+                # 当前运行的版本对应的安装包永不删除：真要回滚时它最可能是
+                # 需要的那一个。版本号从 health 那份进程状态里取，比查 GitHub 稳。
+                # RT.status() 是引擎进程状态，里面没有面板版本号，直接用 RT.version
+                running = str(RT.version or "")
+                try:
+                    results["updates"] = RT.store.purge_updates(
+                        keep, protect_version=running)
+                except (TypeError, ValueError) as exc:
+                    self.fail(400, "清理更新包失败：%s" % (exc,))
+                    return
+            if target in ("logs", "log", "all"):
+                which = str(body.get("which") or "all").strip().lower()
+                if which not in ("engine", "panel", "all"):
+                    self.fail(400, "不支持的日志类型：%s（engine / panel / all）" % which)
+                    return
+                # 引擎日志由 core 处理（运行中要 truncate 而不是 unlink，
+                # 否则 aMule 手里的 fd 会让空间不释放）。引擎没起来时
+                # clear_logs 会抛 EmuleOffline，那也只当成"这次没清成"，
+                # 不该让整个清理请求失败。
+                if which in ("engine", "all"):
+                    try:
+                        results["engine_logs"] = RT.call("clear_logs", "engine", timeout=15.0)
+                    except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing) as exc:
+                        results["engine_logs"] = {"removed": [], "freed": 0,
+                                                  "error": str(exc)}
+                # 面板日志最后清：前面几步可能刚往 panel.log 里写过记录
+                if which in ("panel", "all"):
+                    results["panel_logs"] = RT.store.clear_log("panel_all")
+            if not results:
+                self.fail(400, "请指定要清理的内容（updates / logs / all）")
+                return
+            freed = 0
+            removed = 0
+            failed = []
+            for key, value in results.items():
+                if not isinstance(value, dict):
+                    continue
+                freed += int_or(value.get("freed"))
+                removed += len(as_list(value.get("removed")))
+                if value.get("error"):
+                    failed.append("%s：%s" % (key, value["error"]))
+            RT.log("维护清理：目标=%s，删除 %d 个文件，回收 %.1f MB"
+                   % (target or "(空)", removed, freed / 1024.0 / 1024.0))
+            payload = {"ok": True, "target": target, "results": results,
+                       "removed": removed, "freed": freed}
+            if failed:
+                # 部分步骤失败时仍然把成功的那部分结果返回，只是额外带一句原因，
+                # 免得用户以为"什么都没发生"
+                payload["warnings"] = failed
+            self.send_json(payload)
+            return
+
         # ---------------- 备份 ----------------
         if path == "/api/backup/status":
             self.require_method(method, "GET")

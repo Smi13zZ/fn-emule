@@ -206,6 +206,10 @@
         backupData: { items: [] },
         backupRunning: false,
 
+        storageData: { items: [], total: 0, updates: [] },
+        storageLoading: false,
+        storageBusy: "",
+
         updateInfo: null,
         updateChecking: false,
         updateInstalling: false,
@@ -260,6 +264,7 @@
           { id: "bootstrap", label: t("settings.tab.bootstrap") },
           { id: "notify", label: t("settings.tab.notify") },
           { id: "backup", label: t("settings.tab.backup") },
+          { id: "storage", label: t("settings.tab.storage") },
           { id: "update", label: t("settings.tab.update") },
           { id: "about", label: t("settings.tab.about") },
         ];
@@ -561,6 +566,7 @@
         if (v === "update" && !this.updateInfo) this.checkUpdate(false);
         if (v === "notify" && !this.notifyChannels.length) this.loadNotify();
         if (v === "backup") this.loadBackup();
+        if (v === "storage") this.loadStorage();
       },
       "channelForm.type": function (type) {
         if (type) this.ensureChannelFields(type);
@@ -1410,10 +1416,29 @@
           this.logsLoading = false;
         }
       },
+      /* 「清屏」以前只把浏览器内存里那个数组清空，刷新一下就原样回来，
+         用户点了几次都以为坏了。现在它真的清磁盘上的日志文件
+         （引擎日志就地截断，面板日志直接删），清完再重新拉一次列表。 */
       clearLogs: function () {
-        this.logs = [];
-        this.logCleared = true;
-        this.ok("logs.cleared");
+        const self = this;
+        this.confirmBox = {
+          title: this.t("logs.clearTitle"),
+          text: this.t("logs.clearText"),
+          okText: this.t("logs.clear"),
+          onOk: async function () {
+            self.confirmBox = null;
+            try {
+              const r = await window.EMU_API.maintenanceCleanup("logs", { which: "all" });
+              const freed = (r && Number(r.freed)) || 0;
+              self.logs = [];
+              self.logCleared = true;
+              await self.loadLogs(true);
+              self.toast(self.t("logs.clearedDisk", { v: self.fmt.fmtBytes(freed) }));
+            } catch (e) {
+              self.fail("logs.clearFailed", e);
+            }
+          },
+        };
       },
       jumpToLogEnd: function () {
         const box = this.$refs.logBox;
@@ -1720,6 +1745,92 @@
             }
           },
         };
+      },
+
+      /* ---------------- 维护 / 存储 ---------------- */
+      loadStorage: async function () {
+        this.storageLoading = true;
+        try {
+          const d = await window.EMU_API.maintenanceStorage();
+          this.storageData = d || { items: [], total: 0, updates: [] };
+        } catch (e) {
+          if (!this.storageData || !this.storageData.items) {
+            this.storageData = { items: [], total: 0, updates: [] };
+          }
+        } finally {
+          this.storageLoading = false;
+        }
+      },
+      /* 清理按钮统一走这里：先确认，再调接口，最后刷新统计。
+         target = updates（更新包）/ logs（日志）/ all（两者都清）。 */
+      askCleanup: function (target) {
+        const self = this;
+        const titles = {
+          updates: "settings.storage.cleanUpdates",
+          logs: "settings.storage.cleanLogs",
+          all: "settings.storage.cleanAll",
+        };
+        const texts = {
+          updates: "settings.storage.cleanUpdatesText",
+          logs: "settings.storage.cleanLogsText",
+          all: "settings.storage.cleanAllText",
+        };
+        const freed = this.storageTotalFor(target);
+        this.confirmBox = {
+          title: this.t(titles[target] || titles.all),
+          text: this.t(texts[target] || texts.all, { v: this.fmt.fmtBytes(freed) }),
+          okText: this.t("settings.storage.cleanOk"),
+          onOk: async function () {
+            self.confirmBox = null;
+            await self.runCleanup(target);
+          },
+        };
+      },
+      /* 清理时实际会释放多少：更新包那边要扣掉"当前版本"那个包
+         （后端会保护它，不算进可回收空间），否则确认框里报的数字偏大。 */
+      storageTotalFor: function (target) {
+        const items = (this.storageData && this.storageData.items) || [];
+        const pick = (keys) => items
+          .filter(function (it) { return keys.indexOf(it.key) >= 0; })
+          .reduce(function (sum, it) { return sum + (Number(it.bytes) || 0); }, 0);
+        let updates = pick(["updates"]);
+        // 当前版本那个包不会被删，从可回收空间里扣掉
+        const cur = (this.storageData && this.storageData.current_version) || "";
+        if (cur) {
+          ((this.storageData && this.storageData.updates) || []).forEach(function (u) {
+            if (u && !u.partial && String(u.name || "").indexOf(cur) >= 0) {
+              updates = Math.max(0, updates - (Number(u.bytes) || 0));
+            }
+          });
+        }
+        const logs = pick(["amuled_log", "amuled_log1", "panel_log", "panel_log1", "update_log"]);
+        if (target === "updates") return updates;
+        if (target === "logs") return logs;
+        return updates + logs;
+      },
+      runCleanup: async function (target) {
+        if (this.storageBusy) return;
+        this.storageBusy = target;
+        try {
+          const payload = { target: target };
+          if (target === "updates" || target === "all") {
+            payload.keep = Number(this.storageData.updates_keep) || 2;
+          }
+          if (target === "logs" || target === "all") payload.which = "all";
+          const r = await window.EMU_API.maintenanceCleanup(target, payload);
+          const freed = (r && Number(r.freed)) || 0;
+          this.toast(this.t("settings.storage.cleaned", { v: this.fmt.fmtBytes(freed) }));
+          if (r && r.warnings && r.warnings.length) {
+            this.toast(String(r.warnings[0]), "err");
+          }
+          await this.loadStorage();
+          // 清完日志，日志页的缓存也过期了，下次进去重新拉
+          this.logCleared = false;
+        } catch (e) {
+          this.fail("settings.storage.cleanFailed", e);
+        } finally {
+          this.storageBusy = "";
+        }
       },
 
       /* ---------------- update ---------------- */

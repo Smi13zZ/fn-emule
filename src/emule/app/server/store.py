@@ -45,6 +45,11 @@ LOG_READ_BYTES = 256 * 1024
 #: added.json 里最多留多少个 hash（任务删除时会主动清理，这是兜底上限）
 ADDED_RECORDS_MAX = 5000
 
+#: updates/ 里最多保留几个历史安装包（含当前版本那一个）。
+#: 每升级一次就多一个约 9 MB 的 fpk，实测生产机三天堆到 135 MB / 16 个，
+#: 而装完之后这些包再无用处 —— 只留最近几个够回滚就够了。
+UPDATES_KEEP = 2
+
 VERSION_FALLBACK = "26.11.0"
 
 SERVER_MET_URL = "https://upd.emule-security.org/server.met"
@@ -124,7 +129,8 @@ def default_settings(env=None, share_dir=""):
             "events": {"complete": True, "error": True},
         },
         "backup": {"auto": False, "keep": 7, "last": 0},
-        "update": {"repo": UPDATE_REPO, "check": True, "last": 0, "latest": ""},
+        "update": {"repo": UPDATE_REPO, "check": True, "last": 0, "latest": "",
+                   "keep_packages": UPDATES_KEEP},
     }
 
 
@@ -424,6 +430,154 @@ class Store(object):
             else:
                 out.append({"t": int(time.time()), "level": "info", "text": line})
         return out
+
+    # -- 维护 / 存储 --------------------------------------------------------
+    def storage_report(self):
+        """统计各目录占用，返回 [{key,label,bytes,files,path,kind}]。
+
+        只报"有文件"的项和固定的几项，空目录不占地方就不列。所有大小都是
+        递归求和（updates / deleted 下都有多层），算不出来按 0 处理 ——
+        维护页是给人看的诊断信息，不能因为某个目录没权限就整页失败。
+        """
+        def walk_size(path):
+            total = 0
+            files = 0
+            try:
+                for root, _dirs, names in os.walk(path):
+                    for name in names:
+                        try:
+                            total += os.path.getsize(os.path.join(root, name))
+                            files += 1
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+            return total, files
+
+        def file_size(path):
+            try:
+                if os.path.isfile(path):
+                    return os.path.getsize(path), 1
+            except OSError:
+                pass
+            return 0, 0
+
+        rows = []
+        for key, label, path, kind in (
+            ("updates", "更新包缓存", self.update_dir, "dir"),
+            ("backups", "配置备份", self.backup_dir, "dir"),
+            ("deleted", "删除任务保留的数据", os.path.join(self.var_dir, "deleted"), "dir"),
+            ("history", "统计历史", self.history_dir, "dir"),
+            ("amuled_log", "引擎日志", os.path.join(self.var_dir, "amuled.log"), "file"),
+            ("amuled_log1", "引擎日志（上一份）", os.path.join(self.var_dir, "amuled.log.1"), "file"),
+            ("panel_log", "面板日志", self.log_path, "file"),
+            ("panel_log1", "面板日志（上一份）", self.log_path + ".1", "file"),
+            ("update_log", "更新安装日志", os.path.join(self.var_dir, "update-install.log"), "file"),
+        ):
+            if kind == "dir":
+                size, files = walk_size(path)
+            else:
+                size, files = file_size(path)
+            rows.append({"key": key, "label": label, "bytes": int(size),
+                         "files": int(files), "path": path, "kind": kind})
+        return {"items": rows, "total": sum(item["bytes"] for item in rows),
+                "var_dir": self.var_dir}
+
+    def updates_list(self):
+        """updates/ 下的安装包清单，新的在前。含半截的 .part。"""
+        out = []
+        try:
+            names = os.listdir(self.update_dir)
+        except OSError:
+            return out
+        for name in names:
+            if not (name.endswith(".fpk") or name.endswith(".fpk.part")):
+                continue
+            path = os.path.join(self.update_dir, name)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            out.append({
+                "name": name,
+                "bytes": int(stat.st_size),
+                "t": int(stat.st_mtime),
+                "partial": name.endswith(".part"),
+            })
+        out.sort(key=lambda item: item["t"], reverse=True)
+        return out
+
+    def purge_updates(self, keep=UPDATES_KEEP, protect_version=""):
+        """清掉 updates/ 里的历史安装包，只留最新 keep 个 .fpk。
+
+        **一律删掉所有 .part**：那是下载中断留下的半截文件，永远不会被用到
+        （升级脚本只认 .fpk）。keep 按完整的 .fpk 计数，.part 不占名额。
+
+        **protect_version 指定的那个包永不删除**。当前正在运行的版本如果被删掉，
+        一旦需要回滚就没有本地安装包了，而它正是最可能用到的那一个。
+        比对方式：文件名里含该版本号即视为受保护（包名是
+        fn-emule-<version>-fnos-all.fpk，tag 带不带 v 都能匹配）。
+        """
+        try:
+            keep = max(0, min(20, int(keep)))
+        except (TypeError, ValueError):
+            keep = UPDATES_KEEP
+        protect = str(protect_version or "").strip().lstrip("vV")
+        removed = []
+        kept = []
+        freed = 0
+        root = os.path.realpath(self.update_dir)
+        items = self.updates_list()
+        full = [item for item in items if not item["partial"]]
+        # 新的在前，前 keep 个保留
+        keep_names = set(item["name"] for item in full[:keep])
+        for item in items:
+            name = item["name"]
+            in_use = bool(protect) and protect in name
+            if in_use:
+                kept.append(name)
+                continue
+            if not item["partial"] and name in keep_names:
+                kept.append(name)
+                continue
+            path = os.path.join(self.update_dir, name)
+            # realpath 校验：只删 updates 目录里的东西，拒绝任何 ../ 逃逸
+            if not os.path.realpath(path).startswith(root + os.sep):
+                continue
+            try:
+                os.remove(path)
+                removed.append(name)
+                freed += item["bytes"]
+            except OSError:
+                pass
+        if removed:
+            self.log("清理更新包缓存：删除 %d 个文件，回收 %.1f MB"
+                     % (len(removed), freed / 1024.0 / 1024.0))
+        return {"removed": removed, "kept": kept, "count": len(removed),
+                "freed": freed, "keep": keep, "protect": protect}
+
+    def clear_log(self, which="panel"):
+        """清空日志文件。which = panel | panel_all | amuled_all。
+
+        引擎日志（amuled.log）面板不能直接 unlink —— aMule 进程还持有它的
+        fd，删掉目录项只会让磁盘空间继续被旧 inode 占着，看起来"删了没变小"。
+        所以引擎日志的清理交给 AmuleCtl.block_log / Service 那边处理，
+        这里只负责面板自己的两个文件。
+        """
+        removed = []
+        targets = []
+        if which in ("panel", "panel_all"):
+            targets.append(self.log_path)
+        if which == "panel_all":
+            targets.append(self.log_path + ".1")
+        for path in targets:
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+                    removed.append(os.path.basename(path))
+            except OSError:
+                pass
+        return {"removed": removed, "count": len(removed)}
 
     # -- 速度历史 -----------------------------------------------------------
     def push_history(self, down, up, t=None):
