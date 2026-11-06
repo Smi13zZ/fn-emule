@@ -980,8 +980,7 @@ canvas { display: block; width: 100%; height: 100%; }
   .tbar-tasks .tsearch { order: 1; flex: 1 1 140px; width: auto !important; min-width: 0; }
   .tbar-tasks .tadd { order: 2; flex: 0 0 auto; padding: 0 12px; }
   .tbar-tasks .spacer { display: none; }
-  .tbar-tasks .tseg { order: 3; flex: 0 1 auto; }
-  .tbar-tasks .tseg button { padding: 0 7px; }
+  .tbar-tasks .tfilterseg { order: 3; flex: 1 1 auto; min-width: 0; }
   .tbar-tasks .tsort { order: 4; flex: 0 0 auto; gap: 6px; }
   .tbar-tasks .tsort-pick { flex: 0 0 auto; width: 96px; min-width: 96px; padding-right: 22px; }
   .topbar-server { max-width: 110px; height: 30px; font-size: 12px; padding: 0 8px; }
@@ -1153,7 +1152,6 @@ canvas { display: block; width: 100%; height: 100%; }
   .tbar-tasks .tsearch { order: 1; flex: 1 1 130px; width: auto !important; min-width: 0; }
   .tbar-tasks .tadd { order: 2; flex: 0 0 auto; padding: 0 12px; }
   .tbar-tasks .spacer { display: none; }
-  .tbar-tasks .tkindseg { order: 3; flex: 0 0 auto; }
   .tbar-tasks .tfilterseg {
     order: 4; flex: 1 1 0; min-width: 0; overflow-x: auto;
     scrollbar-width: none; -ms-overflow-style: none;
@@ -1185,14 +1183,13 @@ canvas { display: block; width: 100%; height: 100%; }
     grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-areas:
       "search search add"
-      "kind filters filters"
+      "filters filters filters"
       "sort sort sort";
     gap: 8px;
     align-items: center;
   }
   .tbar-tasks .tsearch { grid-area: search; width: auto !important; min-width: 0; }
   .tbar-tasks .tadd { grid-area: add; }
-  .tbar-tasks .tkindseg { grid-area: kind; }
   .tbar-tasks .tfilterseg {
     grid-area: filters; min-width: 0; overflow-x: auto;
     scrollbar-width: none; -ms-overflow-style: none;

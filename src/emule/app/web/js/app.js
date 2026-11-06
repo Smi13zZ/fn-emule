@@ -132,13 +132,11 @@
 
         overview: {},
         transfersData: { items: [], summary: {}, total: 0 },
-        kind: "download",
-        kinds: ["download", "upload"],
 
         search: "",
         filter: "all",
-        filters: ["all", "downloading", "waiting", "paused", "complete", "error"],
-        sortKeys: ["added", "name", "size", "percent", "speed", "eta"],
+        filters: ["all", "downloading", "uploading", "waiting", "paused", "complete", "error"],
+        sortKeys: ["added", "kind", "name", "size", "percent", "speed", "eta"],
         sortKey: "added",
         sortAsc: false,
         selection: [],
@@ -366,14 +364,25 @@
             y = String(b.name || "");
             return x.localeCompare(y) * dir;
           }
-          if (key === "added") { x = a.added; y = b.added; }
+          // "kind" groups every download together and every upload together,
+          // which is what people expect from one merged list.
+          if (key === "kind") { x = a.kind === "upload" ? 1 : 0; y = b.kind === "upload" ? 1 : 0; }
+          else if (key === "added") { x = a.added; y = b.added; }
           else { x = a[key]; y = b[key]; }
           return ((Number(x) || 0) - (Number(y) || 0)) * dir;
         });
         return list;
       },
+      /* Only download rows carry a checkbox: an upload row is a peer session that
+         is currently pulling from us, not a queued job that can be paused or
+         deleted. Mixing them into select-all made the header checkbox look
+         half-broken, so the selectable set is downloads-only. */
+      selectableTasks: function () {
+        return this.visibleTasks.filter(function (it) { return it.kind !== "upload"; });
+      },
       allSelected: function () {
-        return this.visibleTasks.length > 0 && this.selection.length === this.visibleTasks.length;
+        const list = this.selectableTasks;
+        return list.length > 0 && this.selection.length === list.length;
       },
       selectedTasks: function () {
         const set = {};
@@ -384,6 +393,7 @@
         const t = this.t;
         const buckets = [
           { key: "downloading", label: t("tasks.filter.downloading"), color: CHART.cssVar("--dl", "#2563eb"), n: 0 },
+          { key: "uploading", label: t("tasks.filter.uploading"), color: CHART.cssVar("--ul", "#02b8cc"), n: 0 },
           { key: "waiting", label: t("tasks.filter.waiting"), color: CHART.cssVar("--warn", "#f59e0b"), n: 0 },
           { key: "paused", label: t("tasks.filter.paused"), color: CHART.cssVar("--idle", "#a3a3a3"), n: 0 },
           { key: "complete", label: t("tasks.filter.complete"), color: CHART.cssVar("--ok", "#16a34a"), n: 0 },
@@ -547,7 +557,6 @@
         }
       },
       filter: function () { this.selection = []; },
-      kind: function () { this.selection = []; },
       settingsTab: function (v) {
         if (v === "update" && !this.updateInfo) this.checkUpdate(false);
         if (v === "notify" && !this.notifyChannels.length) this.loadNotify();
@@ -797,7 +806,7 @@
       refresh: async function (force) {
         if (force) this.busy = true;
         try {
-          const tasks = await window.EMU_API.transfers(this.kind);
+          const tasks = await window.EMU_API.transfers();
           this.connected = true;
           this.connError = "";
           this.transfersData = tasks || { items: [], summary: {} };
@@ -897,18 +906,12 @@
       },
 
       /* ---------------- tasks ---------------- */
-      switchKind: function (k) {
-        if (this.kind === k) return;
-        this.kind = k;
-        this.transfersData = { items: [], summary: {}, total: 0 };
-        this.refresh(true);
-      },
       setSort: function (key) {
         if (this.sortKey === key) this.sortAsc = !this.sortAsc;
         else { this.sortKey = key; this.sortAsc = key === "name"; }
       },
       toggleAll: function (checked) {
-        this.selection = checked ? this.visibleTasks.map((it) => it.hash) : [];
+        this.selection = checked ? this.selectableTasks.map((it) => it.hash) : [];
       },
       togglePause: async function (it) {
         const action = FMT.isPaused(it) ? "resume" : "pause";
@@ -1014,7 +1017,10 @@
         this.detailHash = hash;
         this.detailTab = "info";
         this.detailData = { file: it, sources: [], chunks: [] };
-        this.loadDetail(hash, false);
+        // An upload row is a peer session, not a partfile: /transfers/{hash} only
+        // knows download entries, so asking it would just fail and blank the
+        // drawer. Everything worth showing is already on the row itself.
+        if (it.kind !== "upload") this.loadDetail(hash, false);
       },
       closeDetail: function () {
         this.detail = null;

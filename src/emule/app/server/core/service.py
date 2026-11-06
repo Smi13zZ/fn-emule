@@ -103,15 +103,37 @@ _PRIORITY_RAW = {
 _SERVER_PRIORITY = {SRV_PR_NORMAL: "normal", SRV_PR_HIGH: "high", SRV_PR_LOW: "low"}
 _SERVER_PRIORITY_RAW = {"normal": SRV_PR_NORMAL, "high": SRV_PR_HIGH, "low": SRV_PR_LOW}
 
-#: 客户端下载/上传状态（updownclient.h EDownloadState / EUploadState）
+#: 客户端下载/上传状态。序号必须与 aMule 2.3.3 的 src/Constants.h 一模一样
+#: （EDownloadState / EUploadState），错一位整张表就会张冠李戴 —— 例如
+#: DS_ONQUEUE(1) 会被读成"连接中"、DS_LOWTOLOWIP(10) 会被读成"连接数超限"，
+#: 而真正在传输的 DS_DOWNLOADING(0) 反而显示成"无状态"。
 _CLIENT_DOWNLOAD_STATE = {
-    0: "none", 1: "connecting", 2: "transferring", 3: "queued", 4: "waiting",
-    5: "idle", 6: "no_needed_parts", 7: "pending", 8: "banned", 9: "error",
-    10: "too_many_connections", 11: "connecting", 12: "requesting",
+    0: "downloading",            # DS_DOWNLOADING
+    1: "queued",                 # DS_ONQUEUE
+    2: "connected",              # DS_CONNECTED
+    3: "connecting",             # DS_CONNECTING
+    4: "waiting",                # DS_WAITCALLBACK
+    5: "waiting",                # DS_WAITCALLBACKKAD
+    6: "requesting",             # DS_REQHASHSET
+    7: "no_needed_parts",        # DS_NONEEDEDPARTS
+    8: "too_many_connections",   # DS_TOOMANYCONNS
+    9: "too_many_connections",   # DS_TOOMANYCONNSKAD
+    10: "low_id",                # DS_LOWTOLOWIP
+    11: "banned",                # DS_BANNED
+    12: "error",                 # DS_ERROR
+    13: "none",                  # DS_NONE
+    14: "waiting",               # DS_REMOTEQUEUEFULL
 }
 _CLIENT_UPLOAD_STATE = {
-    0: "none", 1: "waiting", 2: "uploading", 3: "pending", 4: "getting_hash",
-    5: "uploading", 6: "banned", 7: "error", 8: "queued", 9: "too_many",
+    0: "uploading",              # US_UPLOADING
+    1: "queued",                 # US_ONUPLOADQUEUE
+    2: "waiting",                # US_WAITCALLBACK
+    3: "connecting",             # US_CONNECTING
+    4: "pending",                # US_PENDING
+    5: "low_id",                 # US_LOWTOLOWIP
+    6: "banned",                 # US_BANNED
+    7: "error",                  # US_ERROR
+    8: "none",                   # US_NONE
 }
 
 #: CONTRACT 的 method → aMule 搜索的文件类型筛选（空 = 不限类型，按文件名搜）
@@ -898,6 +920,9 @@ class EmuleService(object):
                 "ec": status["ec"],
                 "version": status["version"] or "",
                 "pid": status["pid"],
+                # 概览页的"运行时长"读这里；漏传的话前端会一直显示 00:00:00
+                # （/api/health 走的是 process_status()，那边一直是对的）。
+                "uptime": int(status.get("uptime") or 0),
             },
             "ed2k": {
                 "connected": bool(state.get("ed2k_connected")),
@@ -1063,34 +1088,49 @@ class EmuleService(object):
         }
 
     def transfers(self, kind):
-        if kind not in ("download", "upload"):
-            raise EmuleError("不支持的传输类型：%s（只支持 download / upload）" % kind)
+        """传输列表。
+
+        kind = "download" / "upload" 只取一侧；"all" 把两侧合成一张表（面板的任务页
+        只用一个列表，上传中的条目和下载任务排在同一个筛选体系里）。合成时每个 item
+        都带 kind 字段，前端据此决定哪些列有意义。
+
+        上传侧的 item 来自 EC 的客户端记录（一个正在从本机拿数据的 peer 一条），
+        所以 size / percent 天然没有意义，取值是 0；真正有意义的只有 speed、
+        uploaded 与 client。
+        """
+        kind_key = (kind or "download").strip().lower()
+        if kind_key not in ("download", "upload", "all"):
+            raise EmuleError("不支持的传输类型：%s（只支持 download / upload / all）" % kind_key)
         client = self._online_client()
-        if kind == "download":
-            records = client.download_queue()
-            items = [self._download_item(record) for record in records]
-            summary = {
-                "count": len(items),
-                "active": sum(1 for item in items if item["status"] == "downloading"),
-                "paused": sum(1 for item in items if item["status"] == "paused"),
-                "waiting": sum(1 for item in items
-                               if item["status"] in ("waiting", "hashing")),
-                "complete": sum(1 for item in items if item["status"] == "complete"),
-                "down": sum(item["speed"] for item in items),
-                "up": 0,
-            }
+        downloads = []
+        uploads = []
+        if kind_key in ("download", "all"):
+            downloads = [self._download_item(record) for record in client.download_queue()]
+            for item in downloads:
+                item["kind"] = "download"
+        if kind_key in ("upload", "all"):
+            uploads = [self._upload_item(record) for record in client.upload_queue()]
+            for item in uploads:
+                item["kind"] = "upload"
+        if kind_key == "download":
+            items = downloads
+        elif kind_key == "upload":
+            items = uploads
         else:
-            records = client.upload_queue()
-            items = [self._upload_item(record) for record in records]
-            summary = {
-                "count": len(items),
-                "active": sum(1 for item in items if item["status"] == "uploading"),
-                "paused": 0,
-                "waiting": sum(1 for item in items if item["status"] == "waiting"),
-                "complete": 0,
-                "down": 0,
-                "up": sum(item["speed"] for item in items),
-            }
+            items = downloads + uploads
+        summary = {
+            "count": len(items),
+            "downloads": len(downloads),
+            "uploads": len(uploads),
+            "active": sum(1 for item in items if item["status"] == "downloading"),
+            "uploading": sum(1 for item in items if item["status"] == "uploading"),
+            "paused": sum(1 for item in items if item["status"] == "paused"),
+            "waiting": sum(1 for item in items
+                           if item["status"] in ("waiting", "hashing")),
+            "complete": sum(1 for item in items if item["status"] == "complete"),
+            "down": sum(item["speed"] for item in items if item["status"] == "downloading"),
+            "up": sum(item["speed"] for item in items if item["status"] == "uploading"),
+        }
         return {"items": items, "summary": summary, "total": len(items)}
 
     # ------------------------------------------------------------ 传输详情

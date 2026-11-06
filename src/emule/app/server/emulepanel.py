@@ -1127,11 +1127,31 @@ def normalize_overview(data):
     }
 
 
+def normalize_transfer_client(raw):
+    """上传条目的对端客户端信息（EC client 记录里那一截）。"""
+    raw = as_dict(raw)
+    if not raw:
+        return None
+    return {
+        "name": str(raw.get("name") or ""),
+        "software": str(raw.get("software") or ""),
+        "version": int_or(raw.get("version")),
+        "mod": str(raw.get("mod") or ""),
+        "ip": str(raw.get("ip") or ""),
+        "port": int_or(raw.get("port")),
+        "userhash": str(raw.get("userhash") or "").upper(),
+        "score": int_or(raw.get("score")),
+        "upload_state": str(raw.get("upload_state") or ""),
+        "download_state": str(raw.get("download_state") or ""),
+    }
+
+
 def normalize_transfer(item):
     item = as_dict(item)
     sources = as_dict(item.get("sources"))
     # 白名单式整形：core 的 _ecid 等下划线内部字段绝不写进 JSON
     out = {
+        "kind": "upload" if str(item.get("kind") or "") == "upload" else "download",
         "hash": str(item.get("hash") or "").upper(),
         "name": str(item.get("name") or ""),
         "size": int_or(item.get("size")),
@@ -1156,10 +1176,17 @@ def normalize_transfer(item):
         },
         "shared": bool(item.get("shared")),
         "uploading": bool(item.get("uploading")),
+        # 上传条目才有意义：本次/累计已发字节、对端排队位置与客户端信息
+        "uploaded": int_or(item.get("uploaded")),
+        "queue_rank": int_or(item.get("queue_rank")),
+        "waiting_position": int_or(item.get("waiting_position")),
     }
     for extra in ("available_parts", "ed2k_link"):
         if extra in item:
             out[extra] = item.get(extra)
+    client = normalize_transfer_client(item.get("client"))
+    if client:
+        out["client"] = client
     return out
 
 
@@ -1173,7 +1200,10 @@ def normalize_transfers(data, kind):
     if not summary:
         summary = {
             "count": len(items),
+            "downloads": sum(1 for i in items if i["kind"] == "download"),
+            "uploads": sum(1 for i in items if i["kind"] == "upload"),
             "active": sum(1 for i in items if i["status"] in ("downloading", "waiting")),
+            "uploading": sum(1 for i in items if i["status"] == "uploading"),
             "paused": sum(1 for i in items if i["status"] == "paused"),
             "waiting": sum(1 for i in items if i["status"] == "waiting"),
             "complete": sum(1 for i in items if i["status"] == "complete"),
@@ -1183,7 +1213,12 @@ def normalize_transfers(data, kind):
     else:
         summary = {
             "count": int_or(summary.get("count"), len(items)),
+            "downloads": int_or(summary.get("downloads"),
+                                sum(1 for i in items if i["kind"] == "download")),
+            "uploads": int_or(summary.get("uploads"),
+                              sum(1 for i in items if i["kind"] == "upload")),
             "active": int_or(summary.get("active")),
+            "uploading": int_or(summary.get("uploading")),
             "paused": int_or(summary.get("paused")),
             "waiting": int_or(summary.get("waiting")),
             "complete": int_or(summary.get("complete")),
@@ -2309,9 +2344,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/transfers":
             self.require_method(method, "GET")
-            kind = (query.get("type") or ["download"])[0].strip().lower()
-            if kind not in ("download", "upload"):
-                kind = "download"
+            # all（默认）= 下载与上传合成一张表；download / upload 只取一侧，
+            # 留给脚本和冒烟测试继续按单侧查询。
+            kind = (query.get("type") or ["all"])[0].strip().lower()
+            if kind not in ("download", "upload", "all"):
+                kind = "all"
             self.send_json(normalize_transfers(RT.call("transfers", kind), kind))
             return
 

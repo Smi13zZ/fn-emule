@@ -92,7 +92,7 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 | --- | --- | --- |
 | GET | /api/health | 存活探针 `{ok,version,amule:{running,ec}}⟧ |
 | GET | /api/overview | 概览：链路状态/速度/队列/磁盘/会话流量 |
-| GET | /api/transfers?type=download\|upload | 列表 + summary |
+| GET | /api/transfers?type=all\|download\|upload | 列表 + summary（`all` 或缺省 = 下载与上传合成一张表，每条带 `kind`）|
 | POST | /api/transfers/add | `{links:[...], category?, paused?}⟧ → 逐个结果 |
 | GET | /api/transfers/{hash} | 详情：来源列表 + 分块图 + 文件信息 |
 | POST | /api/transfers/{hash}/action | `{action:pause\|resume\|cancel\|delete\|priority, priority?, delete_data?}⟧ |
@@ -137,13 +137,22 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
   "history": [{"t": 1730000000, "down": 0, "up": 0}]
 }
 
-// GET /api/transfers?type=download → {items:[...], summary:{count,active,paused,waiting,complete,down,up}, total}
-// item:
-{"hash":"A1B2...","name":"Ubuntu.iso","size":70866960384,"done":12345678,"percent":0.017,
+// GET /api/transfers?type=all → {items:[...], summary:{count,downloads,uploads,active,uploading,
+//   paused,waiting,complete,down,up}, total, type}
+// item（kind=download）:
+{"kind":"download","hash":"A1B2...","name":"Ubuntu.iso","size":70866960384,"done":12345678,"percent":0.017,
  "speed":123456,"eta":36000,"status":"downloading|paused|waiting|hashing|error|completing",
  "priority":"low|normal|high|auto","category":"","partfile":true,"added":1730000000,
  "sources":{"total":120,"transferring":3,"asked":40,"found":80,"a4af":2},
  "progress":{"completed":12345678},"shared":false,"uploading":false}
+// item（kind=upload）: 一个正在从本机取数据的对端会话。size/percent 无意义（为 0），
+//   有意义的是 speed / uploaded / queue_rank / client{name,software,version,ip,port,userhash}。
+{"kind":"upload","hash":"C3D4...","name":"Ubuntu.iso","size":0,"done":1024,"percent":0.0,
+ "speed":51200,"eta":0,"status":"uploading|waiting","priority":"normal","category":"","partfile":false,
+ "added":0,"sources":{"total":0,"transferring":0,"asked":0,"found":0,"a4af":0},
+ "progress":{"completed":1024},"shared":true,"uploading":true,
+ "uploaded":1024,"queue_rank":0,"waiting_position":0,"client":{"name":"eMule","ip":"1.2.3.4","port":4662}}
+// 只有下载条目有 {hash} 详情、暂停、删除这些操作；上传条目是瞬时会话，不可选中、不可删除。
 
 // GET /api/transfers/{hash} → {"file":{...同上},"sources":[{ip,port,client,version,userhash,speed,state,queue_rank,queue_wait}],
 //   "chunks":[{"start":0,"end":184320,"state":"done|pending|missing"}]}
@@ -225,7 +234,7 @@ class EmuleService:
     def restart(self) -> None
     def process_status(self) -> dict  # {"running","pid","ec","uptime"}
     def overview(self) -> dict
-    def transfers(self, kind: str) -> dict      # kind = "download" | "upload"
+    def transfers(self, kind: str) -> dict      # kind = "download" | "upload" | "all"（all 合并两侧）
     def transfer_detail(self, file_hash: str) -> dict
     def transfer_action(self, file_hash: str, action: str, priority: str|None = None) -> dict
     def transfer_apply(self, hashes, action: str) -> dict

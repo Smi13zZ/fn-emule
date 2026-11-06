@@ -22,7 +22,9 @@ from urllib.parse import urlparse, parse_qs
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB = os.path.join(ROOT, "src", "emule", "app", "web")
 
-LOCK = threading.Lock()
+# RLock: _api() holds the lock for the whole request and the merge helpers below
+# take it again — a plain Lock deadlocks the second acquire.
+LOCK = threading.RLock()
 STATE = {}
 
 
@@ -72,9 +74,19 @@ def seed():
         _mk("Ubuntu 24.04.1 Desktop amd64.iso", 6_300_000_000, 1.0, "complete", 0, 1),
     ]
     for u in uploads:
+        # upload rows are live peer sessions: give them upload-ish numbers so the
+        # merged task table shows speed / transferred / queue instead of a bar.
         u["uploading"] = True
         u["shared"] = True
-        u["status"] = "complete"
+        u["status"] = "uploading"
+        u["speed"] = random.randint(40_000, 900_000)
+        u["uploaded"] = u["done"]
+        u["waiting_position"] = 0
+        u["queue_rank"] = 0
+        u["client"] = {"name": "eMule " + random.choice(["0.70b", "0.60d", "2.3.3"]),
+                       "software": "eMule", "version": 70, "mod": "", "ip": "192.168.1.%d" % random.randint(2, 250),
+                       "port": random.randint(1024, 65000), "userhash": u["hash"], "score": 0,
+                       "upload_state": "uploading", "download_state": "transferring"}
     servers = [
         {"ip": "85.17.116.222", "port": 6082, "name": "ed2k-rust", "desc": "eMule Rust Server", "users": 230000, "maxusers": 500000, "files": 38000000, "priority": "high", "ping": 86, "failed": False, "failed_count": 0},
         {"ip": "176.103.48.36", "port": 2442, "name": "FreeRide", "desc": "FreeRide ED2K", "users": 45000, "maxusers": 150000, "files": 12000000, "priority": "normal", "ping": 210, "failed": False, "failed_count": 0},
@@ -187,18 +199,29 @@ def _apply_delete(hashes, delete_data):
 
 
 def transfers(kind):
-    items = STATE["downloads"] if kind == "download" else STATE["uploads"]
+    """"all" merges both sides into the single task table the panel renders."""
+    downloads = [dict(d, kind="download") for d in STATE["downloads"]]
+    uploads = [dict(u, kind="upload") for u in STATE["uploads"]]
+    if kind == "download":
+        items = downloads
+    elif kind == "upload":
+        items = uploads
+    else:
+        items = downloads + uploads
     with LOCK:
         summary = {
             "count": len(items),
+            "downloads": len(downloads),
+            "uploads": len(uploads),
             "active": sum(1 for i in items if i["status"] in ("downloading", "waiting")),
+            "uploading": sum(1 for i in items if i["status"] == "uploading"),
             "paused": sum(1 for i in items if i["status"] == "paused"),
             "waiting": sum(1 for i in items if i["status"] == "waiting"),
             "complete": sum(1 for i in items if i["status"] == "complete"),
             "down": sum(i["speed"] for i in items if i["status"] == "downloading"),
-            "up": STATE["history"][-1]["up"],
+            "up": sum(i["speed"] for i in items if i["status"] == "uploading"),
         }
-        return {"items": list(items), "summary": summary, "total": len(items)}
+        return {"items": items, "summary": summary, "total": len(items)}
 
 
 def transfer_detail(h):
@@ -264,7 +287,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/overview":
                 return self._json(overview())
             if path == "/api/transfers":
-                return self._json(transfers(qs.get("type", ["download"])[0]))
+                return self._json(transfers(qs.get("type", ["all"])[0]))
             if path in ("/api/transfers/add", "/api/transfers/apply"):
                 pass  # 具体动作路由在下面按精确路径处理，避免被 {hash} 通配吃掉
             elif path.startswith("/api/transfers/"):

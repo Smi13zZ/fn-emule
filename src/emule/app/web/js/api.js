@@ -79,7 +79,9 @@
     diagnostics: function () { return request(BASE + "/diagnostics"); },
 
     /* ---- transfers ---- */
-    transfers: function (type) { return request(BASE + "/transfers" + qs({ type: type || "download" })); },
+    /* type "all" merges downloads and uploads into one list (the panel keeps a
+       single task table); "download" / "upload" still return one side only. */
+    transfers: function (type) { return request(BASE + "/transfers" + qs({ type: type || "all" })); },
     transferDetail: function (hash) { return request(BASE + "/transfers/" + encodeURIComponent(hash)); },
     transferAction: function (hash, action, priority) {
       const body = { action: action };
