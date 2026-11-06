@@ -1395,6 +1395,7 @@
               <span>{{ updateNew ? t('settings.update.newSub') : t('settings.update.upSub') }}</span>
             </div>
             <div class="spacer"></div>
+            <i class="vbreak" aria-hidden="true"></i>
             <button class="btn sm" type="button" :disabled="updateChecking || updateInstalling" @click="checkUpdate(true)">
               <span class="ic" v-html="ic('refresh')"></span>{{ updateChecking ? t('settings.update.checking') : t('settings.update.check') }}
             </button>
