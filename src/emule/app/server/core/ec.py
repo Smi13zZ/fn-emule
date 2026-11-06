@@ -1247,6 +1247,9 @@ class ECClient(object):
         self._inbox = queue.Queue()
         self._lock = threading.RLock()
         self._closed = False
+        #: 发出去但不等回包的请求（目前只有 SHAREDFILES_RELOAD），它回来的是
+        #: EC_OP_NOOP，必须丢掉，不能当成下一个请求的响应。
+        self._pending_noop = 0
         # EC_OP_GET_UPDATE 是「按连接」增量的：同一条连接上第一次回全量，
         # 之后只回 ECID 存根（tag 没有子节点）。所以这里按 ECID 累积上一次的全量结果，
         # 每次请求用当次响应里出现过的 ECID 做一次收敛，连接重建时整体清空。
@@ -1285,6 +1288,7 @@ class ECClient(object):
     def close(self):
         """断开（不会等待 reader 线程退出）。"""
         self._closed = True
+        self._pending_noop = 0          # 连接一断，之前那些不等回包的请求全部作废
         sock, self._sock = self._sock, None
         if sock is not None:
             try:
@@ -1309,6 +1313,7 @@ class ECClient(object):
         # 新连接意味着 aMule 那边的增量 tagmap 从头开始，本地累积必须一起清掉，
         # 否则会把上一条连接见过、这次根本没出现的客户端当成本次结果。
         self._update_cache = {"files": {}, "clients": {}, "servers": {}}
+        self._pending_noop = 0                  # 新连接上没有任何待收的 NOOP
         while not self._inbox.empty():          # 丢掉上次会话的残留包
             try:
                 self._inbox.get_nowait()
@@ -1398,6 +1403,11 @@ class ECClient(object):
     def _await_reply(self, expected, deadline):
         while True:
             packet = self._recv_one(deadline)
+            # 之前发过不等回包的请求（SHAREDFILES_RELOAD），它回来的是 NOOP：
+            # 那是给上一个请求的收尾，不能当成本次请求的响应。
+            if packet.opcode == Op.NOOP and self._pending_noop > 0:
+                self._pending_noop -= 1
+                continue
             if expected is None or packet.opcode in expected:
                 return packet
             if packet.opcode not in PUSH_OPCODES:
@@ -1665,7 +1675,21 @@ class ECClient(object):
         return True
 
     def sharedfiles_reload(self):
-        self.request(Op.SHAREDFILES_RELOAD)
+        """触发 aMule 重扫共享目录；发完就走，不等回包。
+
+        这一个 opcode 在 aMule 侧是**同步**跑完整轮扫描的（ExternalConn.cpp 收到后
+        直接调 CSharedFileList::Reload()，里面逐目录遍历再排哈希任务）。共享目录一多
+        就要几十秒，而 EC 请求在这条连接上是严格串行的 —— 等它的这几十秒里，
+        概览 / 任务 / 日志所有请求全排在后面，前端表现成整页卡死。
+
+        所以只把请求发出去，把"待回收的 NOOP 回包"记个数：它回来的时候由
+        _await_reply 当作迟到回包丢掉，不会被下个请求误认成自己的响应。
+        """
+        with self._lock:
+            if self._sock is None:
+                self._open()
+            self._send(Op.SHAREDFILES_RELOAD)
+            self._pending_noop += 1
         return True
 
     # -- 搜索 ---------------------------------------------------------

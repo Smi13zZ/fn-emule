@@ -44,6 +44,65 @@ MAX_RESTART_PER_HOUR = 5
 AMULED_LOG_MAX_BYTES = 8 * 1024 * 1024
 
 
+#: 展开共享目录时最多走这么多层、最多收这么多条路径。
+#: 目的是防住"把 / 整块共享"这类失误——那种情况下一路递归下去会把
+#: shareddir.dat 撑到几十万行，aMule 启动时要逐个目录扫，直接把面板拖死。
+SHARED_SCAN_MAX_DEPTH = 8
+SHARED_SCAN_MAX_DIRS = 4000
+
+
+def expand_shared_dirs(dirs, max_depth=SHARED_SCAN_MAX_DEPTH,
+                       max_dirs=SHARED_SCAN_MAX_DIRS):
+    """把共享目录展开成"该目录 + 它的全部子目录"。
+
+    aMule 的 AddFilesFromDirectory()（SharedFileList.cpp）**只扫目录的顶层**，
+    看到子目录就跳过——它从不递归。所以用户在面板里加一个装了几千个文件的
+    大目录，aMule 只会把该目录顶层那几个文件算进共享，其余全部静默忽略，
+    日志里最多留一句 "No shareable files found in directory"，界面上看不出问题。
+
+    这里在写 shareddir.dat 之前把子目录一并摊平：aMule 拿到的是一串"每个目录
+    都只有文件"的清单，等价于递归扫描。目录不存在 / 没权限就跳过（不能因为
+    用户写错一个路径就整份配置写不进去）。符号链接不跟随，避免环形目录。
+    """
+    out = []
+    seen = set()
+
+    def add(path):
+        key = os.path.normpath(path)
+        if key in seen:
+            return False
+        if len(out) >= max_dirs:
+            return False
+        seen.add(key)
+        out.append(path)
+        return True
+
+    for raw in dirs or []:
+        path = str(raw or "").strip()
+        if not path:
+            continue
+        path = os.path.normpath(path)
+        if not add(path):
+            continue
+        if not os.path.isdir(path):
+            continue
+        base_depth = path.rstrip(os.sep).count(os.sep)
+        try:
+            for root, subdirs, _files in os.walk(path, followlinks=False):
+                if len(out) >= max_dirs:
+                    break
+                if root.rstrip(os.sep).count(os.sep) - base_depth >= max_depth:
+                    subdirs[:] = []
+                subdirs.sort()
+                for name in subdirs:
+                    if len(out) >= max_dirs:
+                        break
+                    add(os.path.join(root, name))
+        except OSError:
+            continue
+    return out
+
+
 def _md5_hex(text):
     return hashlib.md5((text or "").encode("utf-8")).hexdigest()
 
@@ -380,16 +439,33 @@ class AmuleCtl(object):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, target)
-        # 共享目录：aMule 存在 shareddir.dat，每行一个目录
+        self.write_shareddir(settings)
+        return target
+
+    def write_shareddir(self, settings=None):
+        """写 shareddir.dat：每行一个待扫目录，子目录已摊平。
+
+        aMule 只扫每个目录的顶层（见 expand_shared_dirs），所以这份清单每次都要
+        重新展开 —— 用户的目录树是会变的，光靠"amule.conf 没变就不写"会漏掉
+        新增的子目录。prepare() 每次启动都会无条件调这个方法。
+        """
+        settings = settings or self.settings()
         shared_path = os.path.join(self.config_dir, "shareddir.dat")
-        shared = [path for path in (settings.get("shared_dirs") or []) if path]
+        shared = expand_shared_dirs(settings.get("shared_dirs") or [])
+        body = "\n".join(shared) + ("\n" if shared else "")
+        try:
+            with open(shared_path, "r", encoding="utf-8") as handle:
+                if handle.read() == body:
+                    return shared_path          # 没变化就别动文件，省掉一次落盘
+        except OSError:
+            pass
         tmp_shared = shared_path + ".tmp"
         with open(tmp_shared, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write("\n".join(shared) + ("\n" if shared else ""))
+            handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_shared, shared_path)
-        return target
+        return shared_path
 
     # -- 可执行文件 ---------------------------------------------------
     def runtime_binary(self):

@@ -169,7 +169,7 @@
         downloadingResults: false,
         searchTimer: null,
 
-        sharedData: { items: [], total: 0 },
+        sharedData: { items: [], total: 0, scan: {} },
         sharedReloading: false,
 
         statsData: { groups: [], items: [] },
@@ -1227,7 +1227,7 @@
       loadShared: async function () {
         try {
           const d = await window.EMU_API.shared();
-          this.sharedData = d || { items: [], total: 0 };
+          this.sharedData = d || { items: [], total: 0, scan: {} };
         } catch (e) {
           this.fail("err.loadFailed", e);
         }
@@ -1237,6 +1237,9 @@
         this.sharedReloading = true;
         try {
           await window.EMU_API.sharedReload();
+          // 目录多的时候 aMule 侧要扫一阵才扫完，等两秒再拉列表，
+          // 免得刚点完就显示旧条数、看起来像"没生效"。
+          await new Promise(function (resolve) { setTimeout(resolve, 2000); });
           await this.loadShared();
           this.ok("shared.reloadOk");
         } catch (e) {

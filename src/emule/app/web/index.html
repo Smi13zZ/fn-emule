@@ -638,6 +638,15 @@
       <template v-if="view === 'shared'">
         <div class="toolbar">
           <span class="chip">{{ t('shared.total', { n: sharedData.total || (sharedData.items || []).length }) }}</span>
+          <!-- 扫描范围：引擎只扫每个目录的顶层，子目录是面板摊平进去的。
+               把"配置了几个根 / 实际扫几个目录"摆出来，用户才能看出目录树到底
+               进没进去，而不是只看到一个对不上的条数。 -->
+          <span class="chip faint" v-if="sharedData.scan && sharedData.scan.scan_dirs">
+            {{ t('shared.scanScope', { roots: sharedData.scan.shared_dirs, dirs: sharedData.scan.scan_dirs }) }}
+          </span>
+          <span class="chip warn" v-if="sharedData.scan && sharedData.scan.truncated" :title="t('shared.scanTruncatedHint')">
+            {{ t('shared.scanTruncated') }}
+          </span>
           <div class="spacer"></div>
           <button class="btn" :disabled="sharedReloading" @click="reloadShared">
             <span class="ic" v-html="ic(sharedReloading ? 'refresh' : 'list')"></span>

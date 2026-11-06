@@ -103,8 +103,8 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 | POST | /api/servers/update | 面板自己下载 server.met → 导入 → EC reload |
 | GET | /api/kad | Kad 状态 + 节点数 + 引导信息 |
 | POST | /api/kad/bootstrap | 下载 nodes.dat 并重连 Kad |
-| GET | /api/shared | 共享文件列表 |
-| POST | /api/shared/reload | 重新扫描共享目录 |
+| GET | /api/shared | 共享文件列表（另附 `scan:{shared_dirs,scan_dirs,truncated}` 说明扫描范围）|
+| POST | /api/shared/reload | 重新扫描共享目录（重写摊平后的目录清单后发指令，立即返回；响应含 `shared_dirs` / `scan_dirs`）|
 | POST | /api/search/start | `{q, kind: server\|kad\|global, method: name}⟧ → `{search_id}⟧ |
 | GET | /api/search/{id} | `{progress, done, results:[...]}⟧ |
 | POST | /api/search/{id}/stop | 停止搜索 |
@@ -163,6 +163,28 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 // GET /api/search/{id} → {"search_id":"...","progress":100,"done":true,
 //   "results":[{hash,name,size,sources,type,ext,percent,already}],"started_at":...}
 ```
+
+### 3.5 共享目录必须摊平后交给引擎（v26.11.44 新增）
+
+aMule 的 `CSharedFileList::AddFilesFromDirectory()`（SharedFileList.cpp）**只遍历目录的
+顶层**，遇到子目录直接跳过，从不递归。它也没有任何"还有子目录没扫"的提示——目录里
+只要顶层有文件，日志连 "No shareable files found in directory" 都不会留。
+
+所以面板写 `shareddir.dat` 时必须自己把目录树摊平：`AmuleCtl.expand_shared_dirs()`
+把每个配置的共享目录及其全部子目录逐条列出，aMule 于是把它们当成一串"每个目录只装
+文件"的清单逐个扫，效果等价于递归。
+
+- 上限：`SHARED_SCAN_MAX_DIRS = 4000` 条、`SHARED_SCAN_MAX_DEPTH = 8` 层，
+  防止误共享整块磁盘；到上限时 `/api/shared` 的 `scan.truncated` 为 true，页面会标出来。
+- 不跟随符号链接（防环形目录）；单条路径不存在照常写进去，由引擎自己报
+  "Shared directory not found, skipping"，不因为一条写错就让整份配置失败。
+- `prepare()` 每次启动都会重写一遍（内容没变则不落盘），因为目录树随时会变，
+  不能靠 "amule.conf 有没有变" 来决定刷不刷新。
+
+`EC_OP_SHAREDFILES_RELOAD` 在 aMule 侧是**同步**跑完整轮扫描才回包，而 EC 请求在一条
+连接上严格串行——等它会把概览 / 任务 / 日志全部堵住。`ECClient.sharedfiles_reload()`
+因此只发不等，把待回收的 `EC_OP_NOOP` 记进 `_pending_noop`，迟到时由 `_await_reply`
+丢掉，不会被下一个请求误认成自己的响应。
 
 ### 3.2 删除任务与数据保留（v26.11.35 新增）
 

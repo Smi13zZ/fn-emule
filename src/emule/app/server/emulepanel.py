@@ -2517,7 +2517,14 @@ class Handler(BaseHTTPRequestHandler):
             self.require_method(method, "GET")
             data = as_dict(RT.call("shared"))
             items = as_list(data.get("items"))
-            self.send_json({"items": items, "total": int_or(data.get("total"), len(items))})
+            payload = {"items": items, "total": int_or(data.get("total"), len(items))}
+            # 扫描范围：配置了几个根目录 / 实际摊平出多少个待扫目录。
+            # 共享页拿它显示一行说明，用户能自己看出"是不是没扫到子目录"。
+            try:
+                payload["scan"] = as_dict(RT.call("shared_scan_summary", timeout=8.0))
+            except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing):
+                payload["scan"] = {}     # 诊断信息拿不到不该让共享列表整体失败
+            self.send_json(payload)
             return
 
         if path == "/api/shared/reload":
@@ -2860,7 +2867,11 @@ class Handler(BaseHTTPRequestHandler):
             body = self.json_body()
             cfg = RT.store.section("notify")
             channel_id = str(body.get("id") or "").strip()
-            if body.get("delete") or body.get("action") == "delete":
+            # 删除意图有四种写法：前端的 remove:true、旧版的 delete:true、
+            # action:"delete"，以及不传 body 只打 DELETE。少认一种，界面上点
+            # 删除就会被当成"新增通道"走到底下的类型校验，报「未知的通知通道
+            # 类型：(空)」—— 用户看到的现象就是"通道删不掉"。
+            if (body.get("delete") or body.get("remove") or body.get("action") == "delete"):
                 if not channel_id:
                     self.fail(400, "请提供要删除的通道 id")
                     return

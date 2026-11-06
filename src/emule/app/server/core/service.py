@@ -22,7 +22,8 @@ try:                                                  # 打包运行：core/ 作
         sharedfile_record, connstate_record, uint32_to_ip,
         tag_string, tag_uint, tag_node,
     )
-    from .amule_ctl import AmuleCtl, random_password
+    from .amule_ctl import (AmuleCtl, random_password, expand_shared_dirs,
+                            SHARED_SCAN_MAX_DIRS)
     from . import bootstrap
 except ImportError:                                    # 开发/自测：core/ 直接进 sys.path
     from ec import (                                   # type: ignore
@@ -31,7 +32,8 @@ except ImportError:                                    # 开发/自测：core/ �
         sharedfile_record, connstate_record, uint32_to_ip,
         tag_string, tag_uint, tag_node,
     )
-    from amule_ctl import AmuleCtl, random_password     # type: ignore
+    from amule_ctl import (AmuleCtl, random_password, expand_shared_dirs,   # type: ignore
+                           SHARED_SCAN_MAX_DIRS)
     import bootstrap                                    # type: ignore
 
 
@@ -733,6 +735,10 @@ class EmuleService(object):
                 current = None
             if current != wanted:
                 self._ctl.write_conf(engine)
+            else:
+                # amule.conf 没变也要重写 shareddir.dat：它是摊平后的目录清单，
+                # 用户的子目录随时会增删，不能靠 conf 有没有变来决定刷不刷。
+                self._ctl.write_shareddir(engine)
             status = bootstrap.artifact_status(self.config_dir)
             # aMule 退出时会用内存列表覆盖 server.met；列表为空时它会写回 0 条的文件，
             # 所以这里不能只看文件是否存在，还要看条数。
@@ -1759,9 +1765,35 @@ class EmuleService(object):
         return {0: "low", 1: "normal", 2: "high", 3: "high", 4: "low", 5: "auto"}.get(raw, "normal")
 
     def shared_reload(self):
+        """重新扫描共享目录。
+
+        先重写 shareddir.dat：aMule 只扫每个目录的顶层，子目录必须由面板摊平
+        进清单（见 AmuleCtl.conf_text / expand_shared_dirs）。只发
+        SHAREDFILES_RELOAD 而不重写清单的话，用户新加的子目录永远不会被看到，
+        表现就是"明明有上千个文件，扫到几百个就停了"。
+        """
         client = self._online_client()
+        self._ctl.write_shareddir(self._engine_settings())
         client.sharedfiles_reload()
-        return {"ok": True, "message": "已请求重新扫描共享目录"}
+        engine = self._engine_settings()
+        expanded = len(expand_shared_dirs(engine.get("shared_dirs") or []))
+        return {
+            "ok": True,
+            "message": "已请求重新扫描共享目录",
+            "shared_dirs": len(engine.get("shared_dirs") or []),
+            "scan_dirs": expanded,
+        }
+
+    def shared_scan_summary(self):
+        """给共享页用的一行诊断：配置了几个根目录、实际摊平出多少个待扫目录。"""
+        engine = self._engine_settings()
+        roots = [p for p in (engine.get("shared_dirs") or []) if p]
+        expanded = expand_shared_dirs(roots)
+        return {
+            "shared_dirs": len(roots),
+            "scan_dirs": len(expanded),
+            "truncated": len(expanded) >= SHARED_SCAN_MAX_DIRS,
+        }
 
     # ------------------------------------------------------------ 搜索
     def search_start(self, q, kind, method):
