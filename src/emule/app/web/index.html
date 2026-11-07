@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>eMule</title>
 <link rel="icon" href="./images/icon.svg">
-<link rel="stylesheet" href="./style.css?v=26.11.0">
+<link rel="stylesheet" href="./style.css?v=26.11.50">
 </head>
 <body>
 <div id="app" v-cloak>
@@ -1469,7 +1469,7 @@
                     <div class="mono ellipsis" :title="u.name">
                       {{ u.name }}
                       <span class="chip err" v-if="u.partial" style="margin-left:6px">{{ t('settings.storage.partial') }}</span>
-                      <span class="chip ok" v-else-if="storageData.current_version && u.name.indexOf(storageData.current_version) >= 0" style="margin-left:6px">{{ t('settings.storage.inUse') }}</span>
+                      <span class="tagcur" v-else-if="storageData.current_version && u.name.indexOf(storageData.current_version) >= 0" style="margin-left:6px">{{ t('settings.storage.inUse') }}</span>
                     </div>
                     <div class="sub">{{ u.t ? fmt.fmtDate(u.t) : '—' }}</div>
                   </td>

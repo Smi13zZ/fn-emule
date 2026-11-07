@@ -861,6 +861,16 @@ canvas { display: block; width: 100%; height: 100%; }
 .chip.dl { background: color-mix(in srgb, var(--dl) 12%, transparent); color: var(--dl); }
 .chip.mono { font-family: var(--mono); font-size: 11.5px; }
 
+/* ---------------- current / in-use marker ---------------- */
+/* “当前 / 正在用” 标记：实心反转色，浅色主题近黑底白字，深色主题近白底深字。 */
+.tagcur {
+  display: inline-flex; align-items: center;
+  padding: 3px 6px; border-radius: 5px;
+  font-size: 11px; font-weight: 500; line-height: 1;
+  white-space: nowrap;
+  background: var(--primary); color: var(--primary-fg);
+}
+
 /* ---------------- current server strip ---------------- */
 .curbar {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
