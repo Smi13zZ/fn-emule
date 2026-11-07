@@ -1225,42 +1225,116 @@
           <div class="hint" style="margin-top:12px">{{ t('settings.notify.channelHint') }}</div>
         </div>
 
-        <!-- ---------- backup ---------- -->
+        <!-- ---------- maintenance: export / import ---------- -->
         <div class="card" v-if="settingsTab === 'backup'">
-          <div class="card-head">
-            <h3>{{ t('settings.tab.backup') }}</h3>
-            <div class="spacer"></div>
-            <button class="btn primary" :disabled="backupRunning" @click="runBackup">
-              <span class="ic" v-html="ic(backupRunning ? 'refresh' : 'download')"></span>
-              {{ backupRunning ? t('settings.backup.running') : t('settings.backup.run') }}
+          <h3>{{ t('settings.maintenance') }}</h3>
+          <p class="dim" style="margin:0 0 14px">{{ t('backup.desc') }}</p>
+          <div class="row wrap" style="gap:8px">
+            <button class="btn" type="button" @click="exportBackup">
+              <span class="ic" v-html="ic('download')"></span>{{ t('backup.export') }}
+            </button>
+            <button class="btn" @click="exportToFolder">
+              <span class="ic" v-html="ic('folder')"></span>{{ t('backup.toFolder') }}
             </button>
           </div>
-          <div class="faint" v-if="!(backupData.items || []).length">{{ t('settings.backup.empty') }}</div>
+          <div class="hint" style="margin-top:9px">{{ t('backup.exportHint') }}</div>
+          <div class="sep"></div>
+          <div class="field">
+            <label>{{ t('backup.import') }}</label>
+            <div class="filepick">
+              <button class="btn" @click="$refs.backupInput.click()">
+                <span class="ic" v-html="ic('folder')"></span>{{ t('backup.choose') }}
+              </button>
+              <span class="filepick-name" :title="backupFile ? backupFile.name : ''">
+                {{ backupFile ? backupFile.name : t('file.none') }}
+              </span>
+              <input ref="backupInput" type="file" accept=".json,application/json" @change="onPickBackup">
+            </div>
+            <div class="row" style="margin-top:10px">
+              <button class="btn primary" :disabled="!backupFile || busy" @click="doImport">{{ t('backup.import') }}</button>
+            </div>
+            <div class="hint">{{ t('backup.importWarning') }}</div>
+          </div>
+        </div>
+
+        <!-- ---------- automatic backup ---------- -->
+        <div class="card" v-if="settingsTab === 'backup'">
+          <h3>{{ t('auto.title') }}</h3>
+          <p class="dim" style="margin:0 0 14px">{{ t('auto.desc') }}</p>
+          <div class="form-grid">
+            <div class="field full">
+              <label>{{ t('auto.enabled') }}</label>
+              <label class="switch">
+                <input type="checkbox" v-model="autoForm.enabled">
+                <span>{{ autoForm.enabled ? t('settings.on') : t('auto.none') }}</span>
+              </label>
+            </div>
+            <div class="field">
+              <label>{{ t('auto.interval') }}</label>
+              <input class="input" type="number" v-model.number="autoForm.interval"
+                     :min="autoStatus.interval_min || 1" :max="autoStatus.interval_max || 8760">
+              <div class="hint">{{ t('auto.intervalHelp') }}</div>
+            </div>
+            <div class="field">
+              <label>{{ t('auto.retention') }}</label>
+              <input class="input" type="number" v-model.number="autoForm.retention"
+                     :min="autoStatus.retention_min || 1" :max="autoStatus.retention_max || 60">
+              <div class="hint">{{ t('auto.retentionHelp') }}</div>
+            </div>
+          </div>
+          <dl class="kv" style="margin-top:14px">
+            <dt>{{ t('auto.directory') }}</dt><dd class="mono">{{ autoStatus.directory || '—' }}</dd>
+            <dt>{{ t('auto.lastSuccess') }}</dt><dd>{{ autoStatus.last_success ? fmt.fmtDate(autoStatus.last_success) : t('auto.none') }}</dd>
+            <dt>{{ t('auto.nextRun') }}</dt><dd>{{ autoStatus.next_run ? fmt.fmtDate(autoStatus.next_run) : t('auto.none') }}</dd>
+            <dt>{{ t('auto.lastError') }}</dt>
+            <dd :style="{ color: autoStatus.last_error ? 'var(--danger)' : '' }">{{ autoStatus.last_error || t('auto.none') }}</dd>
+          </dl>
+          <div class="sep"></div>
+          <div class="row wrap" style="gap:8px">
+            <button class="btn primary" @click="saveAuto">{{ t('server.save') }}</button>
+            <button class="btn" @click="runBackupNow">{{ t('auto.runNow') }}</button>
+          </div>
+        </div>
+
+        <!-- ---------- available backups ---------- -->
+        <div class="card" v-if="settingsTab === 'backup'">
+          <div class="card-head">
+            <h3>{{ t('backup.listTitle') }}</h3>
+            <div class="spacer"></div>
+            <span class="chip">{{ (autoStatus.backups || []).length }}</span>
+          </div>
+          <div v-if="!(autoStatus.backups || []).length" class="faint">{{ t('backup.empty') }}</div>
           <div class="bscroll" v-else>
             <table class="ttable tbackup">
               <thead>
                 <tr>
-                  <th>{{ t('settings.backup.list') }}</th>
-                  <th class="num" style="width:96px">{{ t('settings.backup.size') }}</th>
-                  <th class="acts" style="width:150px"></th>
+                  <th>{{ t('backup.createdAt') }}</th>
+                  <th class="num" style="width:96px">{{ t('table.size') }}</th>
+                  <th class="acts" style="width:158px"></th>
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="b in backupData.items" :key="b.name">
+                <tr v-for="b in autoStatus.backups" :key="b.name">
                   <td class="bcname">
-                    <div class="mono ellipsis" :title="b.name">{{ b.name }}</div>
-                    <div class="sub">{{ b.t ? fmt.fmtDate(b.t) : '—' }}</div>
+                    <div class="mono ellipsis bname" :title="b.name">
+                      <span class="bname-full">{{ b.name }}</span>
+                      <span class="bname-short">{{ backupLabel(b.name) }}</span>
+                    </div>
+                    <div class="bmeta mono faint">{{ fmt.fmtBytes(b.size) }}</div>
                   </td>
                   <td class="num mono">{{ fmt.fmtBytes(b.size) }}</td>
                   <td class="acts">
-                    <button class="btn sm" @click="askRestoreBackup(b)">{{ t('settings.backup.restore') }}</button>
-                    <button class="btn sm danger" @click="askDeleteBackup(b)">{{ t('settings.backup.delete') }}</button>
+                    <button class="btn sm" @click="askRestore(b)">{{ t('backup.restore') }}</button>
+                    <button class="btn sm danger" @click="askDeleteBackup(b)">{{ t('backup.delete') }}</button>
                   </td>
                 </tr>
               </tbody>
             </table>
           </div>
-          <div class="hint" style="margin-top:10px">{{ t('settings.backup.hint') }}</div>
+          <div class="hint" style="margin-top:10px"
+               v-if="(autoStatus.backups || []).length > backupsVisible">
+            {{ t('backup.scrollHint', { n: (autoStatus.backups || []).length }) }}
+          </div>
         </div>
 
         <!-- ---------- storage / maintenance ---------- -->

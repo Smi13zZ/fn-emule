@@ -476,6 +476,10 @@ input[type="number"] { -moz-appearance: textfield; }
 .ttable.tbackup tbody td { height: 42px; padding-top: 0; padding-bottom: 0; }
 /* size under the name is the phone layout only (see the 640px block) */
 .ttable.tbackup .bmeta { display: none; font-size: 11px; margin-top: 1px; }
+/* the backup filename lives in a fixed-layout cell: let it ellipsis instead
+   of widening the card on a phone */
+.ttable.tbackup .bcname { min-width: 0; }
+.ttable.tbackup .bname { min-width: 0; }
 /* phones show the timestamp only - the shared backup-file prefix eats
    more than a third of the row and every entry starts with it anyway */
 .ttable.tbackup .bname-short { display: none; }

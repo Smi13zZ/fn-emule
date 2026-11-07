@@ -167,8 +167,18 @@
     },
 
     /* ---- backup ---- */
+    exportUrl: BASE + "/backup/export",
     backupStatus: function () { return request(BASE + "/backup/status"); },
     backupRun: function () { return request(BASE + "/backup/run", { method: "POST", body: {} }); },
+    backupToFolder: function () {
+      return request(BASE + "/backup/to-folder", { method: "POST", body: {} });
+    },
+    backupImport: function (file) {
+      return request(BASE + "/backup/import", {
+        method: "POST", raw: true, body: file,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
     backupRestore: function (name) {
       return request(BASE + "/backup/restore", { method: "POST", body: { name: name } });
     },

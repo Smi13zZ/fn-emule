@@ -203,8 +203,10 @@
         savingChannel: false,
         testingChannel: "",
 
-        backupData: { items: [] },
-        backupRunning: false,
+        autoStatus: {},
+        autoForm: { enabled: false, interval: 24, retention: 7 },
+        backupFile: null,
+        backupsVisible: BACKUP_ROWS,
 
         storageData: { items: [], total: 0, updates: [] },
         storageLoading: false,
@@ -263,7 +265,7 @@
           { id: "dirs", label: t("settings.tab.dirs") },
           { id: "bootstrap", label: t("settings.tab.bootstrap") },
           { id: "notify", label: t("settings.tab.notify") },
-          { id: "backup", label: t("settings.tab.backup") },
+          { id: "backup", label: t("settings.tab.maintenance") },
           { id: "storage", label: t("settings.tab.storage") },
           { id: "update", label: t("settings.tab.update") },
           { id: "about", label: t("settings.tab.about") },
@@ -565,7 +567,7 @@
       settingsTab: function (v) {
         if (v === "update" && !this.updateInfo) this.checkUpdate(false);
         if (v === "notify" && !this.notifyChannels.length) this.loadNotify();
-        if (v === "backup") this.loadBackup();
+        if (v === "backup") this.loadBackupStatus();
         if (v === "storage") this.loadStorage();
       },
       "channelForm.type": function (type) {
@@ -1689,59 +1691,153 @@
         };
       },
 
-      /* ---------------- backup ---------------- */
-      loadBackup: async function () {
+      /* ---------------- maintenance: export / import / auto backup ------- */
+      loadBackupStatus: async function () {
         try {
-          const d = await window.EMU_API.backupStatus();
-          this.backupData = d || { items: [] };
-        } catch (e) { /* keep the previous list */ }
+          const s = await window.EMU_API.backupStatus();
+          this.autoStatus = s || {};
+          this.autoForm = {
+            enabled: !!s.enabled,
+            interval: s.interval_hours || 24,
+            retention: s.retention || 7,
+          };
+        } catch (e) { /* keep previous values */ }
       },
-      runBackup: async function () {
-        if (this.backupRunning) return;
-        this.backupRunning = true;
+
+      exportToFolder: async function () {
         try {
-          const r = await window.EMU_API.backupRun();
-          const name = (r && (r.name || r.path)) ? String(r.name || r.path).split(/[\\/]/).pop() : "";
-          this.toast(this.t("settings.backup.done", { name: name }));
-          await this.loadBackup();
+          const r = await window.EMU_API.backupToFolder();
+          this.toast(this.t("backup.folderWritten", { path: (r && r.path) || "?" }));
+          await this.loadBackupStatus();
         } catch (e) {
-          this.fail("err.opFailed", e);
-        } finally {
-          this.backupRunning = false;
+          this.toast(this.t("backup.exportFailed", { v: e.message }), "err");
         }
       },
-      askRestoreBackup: function (b) {
+
+      /* 桌面用 fetch+blob 拿到真实错误提示；手机 WebView 的下载监听收不到
+         blob: URL，直接导航到附件地址让系统下载管理器接管。 */
+      exportBackup: async function () {
+        if (this.isMobile) {
+          window.location.href = window.EMU_API.exportUrl;
+          this.toast(this.t("backup.downloadStarted"));
+          return;
+        }
+        try {
+          const resp = await fetch(window.EMU_API.exportUrl,
+            { credentials: "same-origin", cache: "no-store" });
+          if (!resp.ok) throw new Error("HTTP " + resp.status);
+          const dispo = resp.headers.get("content-disposition") || "";
+          const m = dispo.match(/filename="?([^"]+)"?/);
+          const name = (m && m[1]) || "emule-config.json";
+          const blob = await resp.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = name; a.style.display = "none";
+          document.body.appendChild(a); a.click(); a.remove();
+          setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+          this.toast(this.t("msg.saved"));
+        } catch (e) {
+          this.toast(this.t("backup.exportFailed", { v: e.message }), "err");
+        }
+      },
+
+      onPickBackup: function (ev) {
+        const f = ev.target.files && ev.target.files[0];
+        this.backupFile = f || null;
+      },
+
+      doImport: async function () {
+        if (!this.backupFile) return;
+        this.busy = true;
+        try {
+          await window.EMU_API.backupImport(this.backupFile);
+          this.toast(this.t("backup.importOk"));
+          setTimeout(function () { location.reload(); }, 900);
+        } catch (e) {
+          this.toast(e.status === 400 ? this.t("backup.invalid")
+            : this.t("backup.importFailed", { v: e.message }), "err");
+        } finally {
+          this.busy = false;
+        }
+      },
+
+      /* 手机上文件名前缀占掉三分之一行，只留日期时间那截才不省略。 */
+      backupLabel: function (name) {
+        const s = String(name || "");
+        const m = s.match(/(\d{8}-\d{6}.*)$/);
+        return m ? m[1] : s;
+      },
+
+      saveAuto: async function () {
+        const st = this.autoStatus || {};
+        const iv = Number(this.autoForm.interval) || 0;
+        const rt = Number(this.autoForm.retention) || 0;
+        if (iv < (st.interval_min || 1) || iv > (st.interval_max || 8760) ||
+            rt < (st.retention_min || 1) || rt > (st.retention_max || 60)) {
+          this.toast(this.t("auto.rangeError"), "err");
+          return;
+        }
+        const patch = {
+          backup: {
+            enabled: !!this.autoForm.enabled,
+            auto: !!this.autoForm.enabled,
+            interval_hours: iv,
+            retention: rt,
+          },
+        };
+        try {
+          await window.EMU_API.saveSettings(patch);
+          this.toast(this.t("auto.saved"));
+          await this.loadBackupStatus();
+        } catch (e) {
+          this.toast(this.t("err.saveFailed", { v: e.message }), "err");
+        }
+      },
+
+      runBackupNow: async function () {
+        try {
+          const r = await window.EMU_API.backupRun();
+          const name = r && r.path ? String(r.path).split(/[\\/]/).pop() : "";
+          this.toast(this.t("auto.ran", { name: name }));
+          await this.loadBackupStatus();
+        } catch (e) {
+          this.toast(this.t("backup.exportFailed", { v: e.message }), "err");
+        }
+      },
+
+      askRestore: function (b) {
         const self = this;
         this.confirmBox = {
-          title: this.t("settings.backup.restoreTitle"),
-          text: this.t("settings.backup.restoreText", { name: b.name }),
-          okText: this.t("settings.backup.restore"),
+          title: this.t("backup.restore"),
+          text: this.t("backup.confirmRestore", { name: b.name }),
+          okText: this.t("backup.restore"),
           onOk: async function () {
             self.confirmBox = null;
             try {
               await window.EMU_API.backupRestore(b.name);
-              self.ok("settings.backup.restoreOk");
-              setTimeout(function () { location.reload(); }, 1200);
+              self.toast(self.t("backup.restoreOk"));
+              setTimeout(function () { location.reload(); }, 900);
             } catch (e) {
-              self.fail("err.opFailed", e);
+              self.toast(self.t("backup.importFailed", { v: e.message }), "err");
             }
           },
         };
       },
+
       askDeleteBackup: function (b) {
         const self = this;
         this.confirmBox = {
-          title: this.t("settings.backup.deleteTitle"),
-          text: this.t("settings.backup.deleteText", { name: b.name }),
-          okText: this.t("settings.backup.delete"),
+          title: this.t("backup.delete"),
+          text: b.name,
+          okText: this.t("backup.delete"),
           onOk: async function () {
             self.confirmBox = null;
             try {
               await window.EMU_API.backupDelete(b.name);
-              self.ok("settings.backup.deleted");
-              await self.loadBackup();
+              self.toast(self.t("backup.deleted"));
+              await self.loadBackupStatus();
             } catch (e) {
-              self.fail("err.deleteFailed", e);
+              self.toast(self.t("err.deleteFailed", { v: e.message }), "err");
             }
           },
         };

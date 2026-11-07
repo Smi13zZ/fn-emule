@@ -40,6 +40,12 @@ HISTORY_MAX = 120
 NOTIFY_LOG_MAX = 500
 BACKUP_KEEP_MIN = 1
 BACKUP_KEEP_MAX = 60
+#: 自动备份周期（小时）与保留份数的允许范围，前后端按同一组值校验。
+#: 保留份数直接对应 backup_prune 的 keep（按备份文件数量计数）。
+BACKUP_INTERVAL_MIN_HOURS = 1
+BACKUP_INTERVAL_MAX_HOURS = 8760
+BACKUP_RETENTION_MIN = BACKUP_KEEP_MIN
+BACKUP_RETENTION_MAX = BACKUP_KEEP_MAX
 LOG_MAX_BYTES = 2 * 1024 * 1024
 LOG_READ_BYTES = 256 * 1024
 #: added.json 里最多留多少个 hash（任务删除时会主动清理，这是兜底上限）
@@ -128,7 +134,9 @@ def default_settings(env=None, share_dir=""):
             "channels": [],
             "events": {"complete": True, "error": True},
         },
-        "backup": {"auto": False, "keep": 7, "last": 0},
+        "backup": {"auto": False, "keep": 7, "last": 0,
+                   "enabled": False, "interval_hours": 24,
+                   "retention": 7, "last_error": "", "last_attempt": 0},
         "update": {"repo": UPDATE_REPO, "check": True, "last": 0, "latest": "",
                    "keep_packages": UPDATES_KEEP},
     }
@@ -556,6 +564,47 @@ class Store(object):
         return {"removed": removed, "kept": kept, "count": len(removed),
                 "freed": freed, "keep": keep, "protect": protect}
 
+    def purge_update_cache(self, keep=UPDATES_KEEP, protect_version="",
+                           download_running=False):
+        """启动初始化时的自动清理：复用 purge_updates，再补删 updates/ 下的 .tmp。
+
+        幂等；download_running 为真（有下载在飞）时整体跳过，避免把下载线程
+        正在写的临时文件删掉。异常由调用方兜住，这里只把结果算出来。
+        """
+        if download_running:
+            return {"skipped": "download_running", "removed": [], "kept": [],
+                    "count": 0, "freed": 0, "keep": keep,
+                    "protect": str(protect_version or "")}
+        result = self.purge_updates(keep=keep, protect_version=protect_version)
+        root = os.path.realpath(self.update_dir)
+        extra = []
+        freed = int(result.get("freed") or 0)
+        try:
+            names = os.listdir(self.update_dir)
+        except OSError:
+            names = []
+        for name in names:
+            if not name.endswith(".tmp"):
+                continue
+            path = os.path.join(self.update_dir, name)
+            try:
+                # realpath 校验：只删 updates 目录里的东西，拒绝任何 ../ 逃逸
+                if not os.path.realpath(path).startswith(root + os.sep):
+                    continue
+                size = os.path.getsize(path)
+                os.remove(path)
+                extra.append(name)
+                freed += size
+            except OSError:
+                pass
+        if extra:
+            self.log("清理更新包缓存：补删 %d 个 .tmp 临时文件，累计回收 %.1f MB"
+                     % (len(extra), freed / 1024.0 / 1024.0))
+        removed = list(result.get("removed") or []) + extra
+        return {"removed": removed, "kept": result.get("kept") or [],
+                "count": len(removed), "freed": freed,
+                "keep": result.get("keep"), "protect": result.get("protect")}
+
     def clear_log(self, which="panel"):
         """清空日志文件。which = panel | panel_all | amuled_all。
 
@@ -776,14 +825,24 @@ class Store(object):
                     os.remove(tmp)
                 except OSError:
                     pass
+                backup_cfg = self.data.setdefault("backup", {})
+                if isinstance(backup_cfg, dict):
+                    backup_cfg["last_error"] = str(exc)
+                    backup_cfg["last_attempt"] = int(time.time())
+                    self.save()
                 raise ValueError("备份失败：%s" % (exc,))
+            backup_cfg = self.data.setdefault("backup", {})
+            if keep is None and isinstance(backup_cfg, dict) and backup_cfg.get("retention"):
+                keep = _clamp_int(backup_cfg.get("retention"),
+                                  BACKUP_KEEP_MIN, BACKUP_KEEP_MAX, 7)
             keep = _clamp_int(
-                keep if keep is not None else (self.data.get("backup") or {}).get("keep", 7),
+                keep if keep is not None else (backup_cfg.get("keep") if isinstance(backup_cfg, dict) else 7),
                 BACKUP_KEEP_MIN, BACKUP_KEEP_MAX, 7)
             removed = self.backup_prune(keep, protect=name)
-            backup_cfg = self.data.setdefault("backup", {})
             if isinstance(backup_cfg, dict):
                 backup_cfg["last"] = int(time.time())
+                backup_cfg["last_error"] = ""
+                backup_cfg["last_attempt"] = int(time.time())
                 self.save()
             try:
                 size = os.path.getsize(dest)
@@ -916,6 +975,118 @@ class Store(object):
                     self.log("恢复 %s 失败：%s" % (arcname, exc), level="error")
         self.log("配置已从 %s 恢复：%s" % (os.path.basename(path), ", ".join(restored)))
         return {"name": os.path.basename(path), "files": restored}
+
+    # -- 配置导出 / 导入 ----------------------------------------------------
+    def backup_settings(self):
+        """自动备份配置：读 settings.backup，老配置（只有 auto/keep/last）也能用。"""
+        cfg = self.data.get("backup") or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        try:
+            interval = int(cfg.get("interval_hours") or 24)
+        except (TypeError, ValueError):
+            interval = 24
+        try:
+            retention = int(cfg.get("retention") or cfg.get("keep") or 7)
+        except (TypeError, ValueError):
+            retention = 7
+        return {
+            "enabled": bool(cfg.get("enabled", cfg.get("auto", False))),
+            "interval_hours": max(BACKUP_INTERVAL_MIN_HOURS,
+                                  min(BACKUP_INTERVAL_MAX_HOURS, interval)),
+            "retention": max(BACKUP_RETENTION_MIN, min(BACKUP_RETENTION_MAX, retention)),
+        }
+
+    def backup_status(self):
+        """/api/backup/status 的载荷：自动备份设置 + 运行状态 + 可用备份列表。"""
+        cfg = self.backup_settings()
+        raw = self.data.get("backup") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        items = self.backup_list()
+        try:
+            last = int(raw.get("last") or 0)
+        except (TypeError, ValueError):
+            last = 0
+        next_run = (last + cfg["interval_hours"] * 3600) if (cfg["enabled"] and last) else 0
+        return {
+            "ok": True,
+            "enabled": cfg["enabled"],
+            "interval_hours": cfg["interval_hours"],
+            "retention": cfg["retention"],
+            "interval_min": BACKUP_INTERVAL_MIN_HOURS,
+            "interval_max": BACKUP_INTERVAL_MAX_HOURS,
+            "retention_min": BACKUP_RETENTION_MIN,
+            "retention_max": BACKUP_RETENTION_MAX,
+            "directory": self.backup_dir,
+            "last_success": last,
+            "next_run": next_run,
+            "last_error": str(raw.get("last_error") or ""),
+            "count": len(items),
+            "backups": [{"name": b["name"], "size": b["size"], "mtime": b["t"]}
+                        for b in items],
+        }
+
+    def export_config(self):
+        """导出当前面板配置为 JSON 对象（不落盘，供 HTTP 层序列化下载）。"""
+        return {
+            "app": "fn-emule",
+            "kind": "config-export",
+            "version": self.version,
+            "created_at": int(time.time()),
+            "settings": copy.deepcopy(self.data),
+        }
+
+    def export_config_file(self):
+        """导出到应用文件夹：把配置写进 backups/ 目录，返回写入路径。"""
+        payload = self.export_config()
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        name = "emule-config-%s.json" % stamp
+        dest = os.path.join(self.backup_dir, name)
+        os.makedirs(self.backup_dir, exist_ok=True)
+        tmp = dest + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        os.replace(tmp, dest)
+        self.log("配置已导出到应用文件夹：%s" % dest)
+        return dest
+
+    def import_config(self, raw):
+        """导入配置：校验 JSON 结构后按默认配置合并写回，返回恢复的分区名。
+
+        只认本面板导出的 JSON（带 kind=config-export 与 settings 对象），
+        其它文件直接拒绝，避免把任意 JSON 当成配置覆盖掉。
+        """
+        if not raw:
+            raise ValueError("导入内容为空")
+        try:
+            data = json.loads(raw.decode("utf-8", "replace") if isinstance(raw, bytes)
+                              else str(raw))
+        except ValueError as exc:
+            raise ValueError("配置文件不是合法的 JSON：%s" % (exc,))
+        if not isinstance(data, dict) or data.get("kind") != "config-export":
+            raise ValueError("不是有效的面板配置导出文件")
+        settings = data.get("settings")
+        if not isinstance(settings, dict):
+            raise ValueError("配置文件里缺少 settings")
+        merged = deep_merge(default_settings(share_dir=self.share_dir), settings)
+        with self._lock:
+            self.data = merged
+            self.save()
+        self.log("配置已从导出文件导入")
+        return {"sections": sorted([k for k in merged if isinstance(merged[k], dict)])}
+
+    def import_config_file(self, name):
+        """从 backups/ 目录导入一份 JSON 导出文件（名字校验沿用备份那套）。"""
+        safe = os.path.basename(str(name or "").strip())
+        if not safe or safe != str(name or "").strip() or not safe.endswith(".json"):
+            raise ValueError("配置文件不存在")
+        path = os.path.join(self.backup_dir, safe)
+        if not os.path.isfile(path):
+            raise ValueError("配置文件不存在")
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        return self.import_config(raw)
 
     # -- 运行时端口文件 -----------------------------------------------------
     def write_runtime_ports(self, port):

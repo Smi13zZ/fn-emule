@@ -52,6 +52,11 @@ HEALTH_TIMEOUT = 2.5
 SAMPLE_INTERVAL = 3.0      # 速度历史采样间隔（CONTRACT §8）
 NOTIFY_INTERVAL = 5.0      # 任务完成/出错检测间隔
 BACKUP_CHECK_INTERVAL = 300.0
+#: 自动备份周期（小时）与保留份数的允许范围，与 store.py 保持一致。
+BACKUP_INTERVAL_MIN_HOURS = storemod.BACKUP_INTERVAL_MIN_HOURS
+BACKUP_INTERVAL_MAX_HOURS = storemod.BACKUP_INTERVAL_MAX_HOURS
+BACKUP_RETENTION_MIN = storemod.BACKUP_RETENTION_MIN
+BACKUP_RETENTION_MAX = storemod.BACKUP_RETENTION_MAX
 HISTORY_POINTS = 60        # /api/overview 返回最近 60 点
 UPDATE_TTL = 900
 UPDATE_FAIL_TTL = 60
@@ -761,6 +766,30 @@ class Runtime(object):
             self.log("引擎启动失败（面板继续运行，可在界面一键重启）：%s" % self.engine_detail,
                      level="error")
 
+    # -- 启动初始化清理 -----------------------------------------------------
+    def purge_update_cache_once(self):
+        """新版本启动后清一次历史安装包，避免 updates/ 越堆越多。
+
+        升级流程是 uninstall -> install -> start，面板进程会被替换，旧进程里删
+        会误删正在安装的包；把清理放在新进程启动初始化最稳妥，装完必然触发，
+        每次正常启动也顺手清历史残留。放后台线程跑，绝不阻断监听与引擎启动。
+        下载进行中整体跳过，异常只记日志。
+        """
+        try:
+            with self._update_lock:
+                running = bool(self._update_task.get("running"))
+            result = self.store.purge_update_cache(
+                keep=storemod.UPDATES_KEEP, protect_version=self.version,
+                download_running=running)
+            removed = int(result.get("count") or 0)
+            if result.get("skipped"):
+                self.log("启动清理跳过：更新包正在下载")
+            elif removed:
+                self.log("启动清理完成：删除 %d 个历史安装包/临时文件，回收 %.1f MB"
+                         % (removed, float(result.get("freed") or 0) / 1024.0 / 1024.0))
+        except Exception as exc:  # noqa: BLE001 - 启动清理失败绝不影响面板启动
+            self.log("启动清理更新包缓存失败：%r" % (exc,), level="warn")
+
     # -- 采样线程 -----------------------------------------------------------
     def start_workers(self):
         for target, name in (
@@ -843,16 +872,20 @@ class Runtime(object):
 
     def backup_loop(self):
         while not self.stopping.wait(BACKUP_CHECK_INTERVAL):
-            cfg = self.store.section("backup")
-            if not cfg.get("auto"):
+            cfg = self.store.backup_settings()
+            if not cfg.get("enabled"):
                 continue
-            last = int_or(cfg.get("last"))
-            if last and time.time() - last < 86400:
+            raw = self.store.section("backup")
+            last = int_or(raw.get("last"))
+            due = last + cfg["interval_hours"] * 3600 if last else 0
+            if due and time.time() < due:
                 continue
             try:
-                result = self.store.backup_create(tag="auto", keep=cfg.get("keep") or 7)
+                result = self.store.backup_create(tag="auto")
                 self.log("自动备份完成：%s" % result.get("name"))
             except Exception as exc:  # noqa: BLE001
+                self.store.set_value("backup", "last_error", str(exc))
+                self.store.set_value("backup", "last_attempt", int(time.time()))
                 self.log("自动备份失败：%r" % (exc,), level="error")
 
     # -- 后台自查新版本 -----------------------------------------------------
@@ -1354,11 +1387,22 @@ def validate_settings_patch(patch):
         if "nick" in engine and len(str(engine.get("nick") or "")) > 64:
             return "昵称过长（最多 64 个字符）"
     backup_cfg = patch.get("backup")
-    if isinstance(backup_cfg, dict) and "keep" in backup_cfg:
-        keep = int_or(backup_cfg.get("keep"), 0)
-        if keep < storemod.BACKUP_KEEP_MIN or keep > storemod.BACKUP_KEEP_MAX:
-            return "备份保留份数应在 %d-%d 之间" % (storemod.BACKUP_KEEP_MIN,
-                                                   storemod.BACKUP_KEEP_MAX)
+    if isinstance(backup_cfg, dict):
+        if "keep" in backup_cfg:
+            keep = int_or(backup_cfg.get("keep"), 0)
+            if keep < storemod.BACKUP_KEEP_MIN or keep > storemod.BACKUP_KEEP_MAX:
+                return "备份保留份数应在 %d-%d 之间" % (storemod.BACKUP_KEEP_MIN,
+                                                       storemod.BACKUP_KEEP_MAX)
+        for key, low, high in (
+            ("interval_hours", storemod.BACKUP_INTERVAL_MIN_HOURS,
+             storemod.BACKUP_INTERVAL_MAX_HOURS),
+            ("retention", storemod.BACKUP_RETENTION_MIN,
+             storemod.BACKUP_RETENTION_MAX),
+        ):
+            if key in backup_cfg:
+                value = int_or(backup_cfg.get(key), low - 1)
+                if value < low or value > high:
+                    return "自动备份的 %s 应在 %d-%d 之间" % (key, low, high)
     update_cfg = patch.get("update")
     if isinstance(update_cfg, dict) and "repo" in update_cfg:
         repo = str(update_cfg.get("repo") or "").strip()
@@ -3018,17 +3062,44 @@ class Handler(BaseHTTPRequestHandler):
         # ---------------- 备份 ----------------
         if path == "/api/backup/status":
             self.require_method(method, "GET")
+            payload = RT.store.backup_status()
+            # 兼容老前端字段（auto / keep / last / dir / items）
             cfg = RT.store.section("backup")
-            items = RT.store.backup_list()
-            self.send_json({
-                "ok": True,
-                "auto": bool(cfg.get("auto")),
-                "keep": int_or(cfg.get("keep"), 7),
-                "last": int_or(cfg.get("last")),
-                "dir": RT.store.backup_dir,
-                "count": len(items),
-                "items": items,
+            payload["auto"] = bool(cfg.get("auto"))
+            payload["keep"] = int_or(cfg.get("keep"), 7)
+            payload["last"] = int_or(cfg.get("last"))
+            payload["dir"] = RT.store.backup_dir
+            payload["items"] = payload.get("backups") or []
+            self.send_json(payload)
+            return
+
+        if path == "/api/backup/export":
+            self.require_method(method, "GET")
+            data = RT.store.export_config()
+            body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+            name = "emule-config-%s.json" % time.strftime("%Y%m%d-%H%M%S")
+            # octet-stream 让手机 WebView 也把它当附件下载，而不是当 JSON 渲染
+            self.send_payload(200, body, "application/octet-stream", {
+                "Content-Disposition": 'attachment; filename="%s"' % name,
             })
+            return
+
+        if path == "/api/backup/to-folder" and method == "POST":
+            try:
+                written = RT.store.export_config_file()
+                self.send_json({"ok": True, "path": written})
+            except (OSError, ValueError) as exc:
+                self.fail(500, "导出失败：%s" % (exc,))
+            return
+
+        if path == "/api/backup/import" and method == "POST":
+            raw = self.read_body()
+            try:
+                result = RT.store.import_config(raw)
+            except ValueError as exc:
+                self.fail(400, str(exc))
+                return
+            self.send_json({"ok": True, "restored": result.get("sections") or []})
             return
 
         if path == "/api/backup/run":
@@ -3380,6 +3451,10 @@ def main(argv=None):
     global RT
     args = parse_args(argv if argv is not None else sys.argv[1:])
     rt = build_runtime(args)
+    # 装完/每次启动都后台清一次历史安装包，别让 updates/ 堆积。放线程里跑，
+    # 不挡监听与引擎启动；下载进行中会自动跳过，异常只记日志。
+    threading.Thread(target=rt.purge_update_cache_once, name="startup-purge",
+                     daemon=True).start()
     # 先监听，再起引擎：cmd/main 只等 30 秒端口就绪，引擎 bootstrap（下载
     # server.met/nodes.dat）可能比这更久，不能把它挡在监听之前。
     try:
