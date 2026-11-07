@@ -124,7 +124,7 @@ jobs:
           set -euo pipefail
           ver="${{ steps.meta.outputs.version }}"
           awk -v v="$ver" '
-            $0 ~ "^## "v"[ \t]*$" {flag=1; print "## eMule 电驴 "v; print ""; skip=1; next}
+            $0 ~ "^## "v"[ \t]*$" {flag=1; print "## eMule "v; print ""; skip=1; next}
             flag && skip && $0 ~ /^[ \t]*$/ {skip=0; next}
             flag && /^## / {exit}
             flag {print}
@@ -146,7 +146,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: eMule 电驴 ${{ steps.meta.outputs.version }}
+          name: eMule ${{ steps.meta.outputs.version }}
           body_path: /tmp/release-body.md
           files: ${{ github.workspace }}/*.fpk
           fail_on_unmatched_files: true
