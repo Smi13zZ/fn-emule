@@ -2861,6 +2861,29 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        # 投递记录单独一条入口：通知设置有自己的 /api/notify，这里只管记录，
+        # 前端独立刷新 / 清空，不必顺带拉一遍通道配置。
+        if path == "/api/notify/log":
+            if method == "GET":
+                try:
+                    limit = int((query.get("limit") or ["50"])[0])
+                except (TypeError, ValueError):
+                    limit = 50
+                limit = max(1, min(limit, storemod.NOTIFY_LOG_MAX))
+                records = [notify_record_public(item)
+                           for item in RT.store.notify_records()]
+                self.send_json({"ok": True, "records": records[:limit],
+                                "total": len(records),
+                                "max": storemod.NOTIFY_LOG_MAX})
+                return
+            if method == "DELETE":
+                self.require_method(method, "DELETE")
+                RT.store.clear_notify_records()
+                self.send_json({"ok": True})
+                return
+            self.require_method(method, "GET")
+            return
+
         if path == "/api/notify/settings":
             self.require_method(method, "POST")
             body = self.json_body()

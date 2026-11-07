@@ -165,6 +165,12 @@
     notifyTest: function (id) {
       return request(BASE + "/notify/test", { method: "POST", body: { id: id } });
     },
+    notifyLog: function (limit) {
+      return request(BASE + "/notify/log" + (limit ? "?limit=" + encodeURIComponent(limit) : ""));
+    },
+    clearNotifyLog: function () {
+      return request(BASE + "/notify/log", { method: "DELETE" });
+    },
 
     /* ---- backup ---- */
     exportUrl: BASE + "/backup/export",

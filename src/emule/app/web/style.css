@@ -706,6 +706,8 @@ input[type="number"] { -moz-appearance: textfield; }
   gap: 6px; min-width: 0;
 }
 .nlogmeta .sep { opacity: .6; }
+/* 元信息里的「·」分隔符：.sep 是横向分割线，不能当行内分隔符用 */
+.nlogmeta .nlogdot { opacity: .6; }
 .nlogerr {
   font-size: 11.5px; color: var(--danger); font-family: var(--mono);
   word-break: break-word; margin-top: 2px;

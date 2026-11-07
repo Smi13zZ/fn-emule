@@ -74,6 +74,9 @@
   /* 与后端 /api/log 的上限（2000）对齐 */
   const LOG_FETCH_LIMIT = 2000;
   const BACKUP_ROWS = 5;
+  /* 投递记录卡片只锁前 5 行的高度，再多就在卡片内滚 */
+  const NOTIFY_LOG_ROWS = 5;
+  const NOTIFY_LOG_GAP = 8;
 
   function clone(o) {
     return JSON.parse(JSON.stringify(o || {}));
@@ -202,6 +205,14 @@
         channelForm: null,
         savingChannel: false,
         testingChannel: "",
+        /* 投递记录：最新在前，来自 var/history/notify-log.json */
+        notifyLog: [],
+        notifyLogTotal: 0,
+        notifyLogMax: 500,
+        notifyLogLoading: false,
+        notifyLogFilter: "all",
+        clearingNotifyLog: false,
+        notifyLogHeight: 0,
 
         autoStatus: {},
         autoForm: { enabled: false, interval: 24, retention: 7 },
@@ -445,6 +456,16 @@
         });
         return keys.map((k) => map[k]);
       },
+      /* ---- 投递记录筛选 ---- */
+      notifyLogShown: function () {
+        const f = this.notifyLogFilter;
+        if (f === "ok") return this.notifyLog.filter(function (r) { return r.ok; });
+        if (f === "fail") return this.notifyLog.filter(function (r) { return !r.ok; });
+        return this.notifyLog;
+      },
+      notifyLogFailed: function () {
+        return this.notifyLog.filter(function (r) { return !r.ok; }).length;
+      },
       /* ---- diagnostics ---- */
       diagGrade: function () {
         const g = (this.diag && this.diag.summary && this.diag.summary.grade) || 'ok';
@@ -566,10 +587,15 @@
       filter: function () { this.selection = []; },
       settingsTab: function (v) {
         if (v === "update" && !this.updateInfo) this.checkUpdate(false);
-        if (v === "notify" && !this.notifyChannels.length) this.loadNotify();
+        if (v === "notify") {
+          if (!this.notifyChannels.length) this.loadNotify();
+          this.loadNotifyLog();
+        }
         if (v === "backup") this.loadBackupStatus();
         if (v === "storage") this.loadStorage();
       },
+      notifyLogFilter: function () { this.$nextTick(this.measureNotifyLog); },
+      lang: function () { this.$nextTick(this.measureNotifyLog); },
       "channelForm.type": function (type) {
         if (type) this.ensureChannelFields(type);
       },
@@ -1686,6 +1712,65 @@
               self.ok("msg.saved");
             } catch (e) {
               self.fail("err.deleteFailed", e);
+            }
+          },
+        };
+      },
+
+      /* ---------------- 投递记录 ---------------- */
+      /* 一条推送一行，成功失败都记；静默失败的 webhook 在这里能直接看出来。 */
+      loadNotifyLog: async function () {
+        if (this.notifyLogLoading) return;
+        this.notifyLogLoading = true;
+        try {
+          const r = await window.EMU_API.notifyLog(120);
+          this.notifyLog = (r && r.records) || [];
+          this.notifyLogTotal = r && r.total !== undefined ? r.total : this.notifyLog.length;
+          if (r && r.max) this.notifyLogMax = r.max;
+        } catch (e) { /* 保留已在屏上的记录 */ }
+        finally {
+          this.notifyLogLoading = false;
+          this.$nextTick(this.measureNotifyLog);
+        }
+      },
+      /* 把列表高度锁在前 5 行的实测高度上，多余的在卡片内滚动 */
+      measureNotifyLog: function () {
+        const box = this.$refs.notifyLogList;
+        if (!box) return;
+        const rows = Array.prototype.slice.call(box.children, 0, NOTIFY_LOG_ROWS);
+        if (!rows.length) {
+          this.notifyLogHeight = 0;
+          return;
+        }
+        let h = 0;
+        rows.forEach(function (row) { h += row.getBoundingClientRect().height; });
+        h += NOTIFY_LOG_GAP * (rows.length - 1);
+        this.notifyLogHeight = Math.ceil(h);
+      },
+      notifyEventLabel: function (event) {
+        const key = "notifyLog.event." + (event || "manual");
+        const label = this.t(key);
+        return label === key ? (event || "") : label;
+      },
+      askClearNotifyLog: function () {
+        if (!this.notifyLog.length) return;
+        const self = this;
+        this.confirmBox = {
+          title: this.t("notifyLog.clear"),
+          text: this.t("notifyLog.clearConfirm"),
+          okText: this.t("notifyLog.clear"),
+          onOk: async function () {
+            self.confirmBox = null;
+            self.clearingNotifyLog = true;
+            try {
+              await window.EMU_API.clearNotifyLog();
+              self.notifyLog = [];
+              self.notifyLogTotal = 0;
+              self.toast(self.t("notifyLog.cleared"));
+            } catch (e) {
+              self.toast(e.message, "err");
+            } finally {
+              self.clearingNotifyLog = false;
             }
           },
         };
