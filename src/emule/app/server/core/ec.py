@@ -1253,7 +1253,7 @@ class ECClient(object):
         # EC_OP_GET_UPDATE 是「按连接」增量的：同一条连接上第一次回全量，
         # 之后只回 ECID 存根（tag 没有子节点）。所以这里按 ECID 累积上一次的全量结果，
         # 每次请求用当次响应里出现过的 ECID 做一次收敛，连接重建时整体清空。
-        self._update_cache = {"files": {}, "clients": {}, "servers": {}}
+        self._reset_update_cache()
 
     # -- 连接管理 -----------------------------------------------------
     @property
@@ -1311,8 +1311,8 @@ class ECClient(object):
     def _open(self):
         self._closed = False
         # 新连接意味着 aMule 那边的增量 tagmap 从头开始，本地累积必须一起清掉，
-        # 否则会把上一条连接见过、这次根本没出现的客户端当成本次结果。
-        self._update_cache = {"files": {}, "clients": {}, "servers": {}}
+        # 否则会把上一条连接见过、这次根本没出现的条目当成本次结果。
+        self._reset_update_cache()
         self._pending_noop = 0                  # 新连接上没有任何待收的 NOOP
         while not self._inbox.empty():          # 丢掉上次会话的残留包
             try:
@@ -1508,12 +1508,106 @@ class ECClient(object):
         return [client_record(tag) for tag in packet.all(Tag.CLIENT)]
 
     def shared_files(self):
+        """EC_OP_GET_SHARED_FILES：拿全部共享文件。
+
+        **这个 opcode 在大共享库下是 O(N²)，不要在热路径上直接调。**
+        aMule 侧 Get_EC_Response_GetSharedFiles() 用
+        `for i in 0..GetFileCount(): GetFileByIndex(i)` 遍历，而
+        CSharedFileList::GetFileByIndex() 内部是
+        `std::advance(m_Files_map.begin(), index)` —— 对 std::map 是线性前进。
+        于是 N 个文件要前进 N²/2 次：实测 1.2 万文件 5 秒、2 万文件 15 秒、
+        6 万文件直接超过面板 15 秒预算变成 504，把整条 EC 连接拖死。
+
+        共享页请改用 :meth:`shared_files_fast`。
+        """
         packet = self.request(Op.GET_SHARED_FILES, detail=Detail.FULL)
         return [sharedfile_record(tag) for tag in packet.all(Tag.KNOWNFILE)]
+
+    def shared_files_fast(self):
+        """同 shared_files，但走 O(N) 的 EC_OP_GET_UPDATE。
+
+        Get_EC_Response_GetUpdate() 遍历的是 `m_FileEncoder`（编码器表），
+        每项直接持有所属文件的指针，没有 GetFileByIndex 那种线性前进，
+        **复杂度是 O(N)**。实测 2 万文件 0.04–0.2 秒，比 GET_SHARED_FILES 快两个数量级。
+
+        **必须走 _update_snapshot()，不能自己发 GET_UPDATE。**
+        原因：aMule 的增量 tagmap 是**按连接**的 —— 同一条连接上第一轮回全量，
+        之后每轮只回「有变化的」，其余是只有 ECID 的存根。而 `m_FileEncoder`
+        是**所有调用方共享**的：get_update() 每调一次就推进一次增量状态。
+        如果这里单独再发一次 GET_UPDATE，它拿到的很可能是别人刚推进过的下一轮，
+        于是只看到存根 —— 存根没有名字/大小/哈希，解析出来就是一堆空记录，
+        列表直接变 0（实测复现：交替调用时 shared 恒为 0）。
+        共享一次快照、各自取自己那份，才能保证两边看到的是同一轮数据。
+        """
+        snapshot = self._update_snapshot()
+        return [dict(record) for record in snapshot["shared"] if record.get("hash")]
+
+    def shared_files_fast_synced(self, expected):
+        """取共享列表，并按引擎自报的条数收敛缓存。
+
+        为什么需要 expected：aMule 的增量回包**没有"删除"这一路**。
+        `CSharedFileList::Reload()` 会先 `m_Files_map.clear()` 再重新扫，
+        但下一轮 GET_UPDATE 只会带上"当前还在"的条目 —— 我们这边按 ECID 累积的
+        旧条目于是永远不会被淘汰。表现为：换过共享目录之后，列表里仍然挂着
+        上一个目录的文件（实测：切到 2 万文件的新目录后，列表里还留着 4964 条
+        旧目录的文件，总数 11740 而引擎只认 6776）。
+
+        所以这里用 `STAT_REQ` 的 `shared_files` 计数当基准：缓存条数超过它，
+        就把缓存里最久没被提到的条目裁掉，直到与引擎自报数量一致。
+        这个计数是 O(1) 的，拿一次很便宜。
+        """
+        records = self.shared_files_fast()
+        try:
+            expected = int(expected)
+        except (TypeError, ValueError):
+            expected = -1
+        if expected < 0:
+            return records
+        with self._lock:
+            cache = self._update_cache.get("shared") or {}
+            excess = len(cache) - expected
+            if excess <= 0:
+                return records
+            # 按"最久没被这一轮提到"排序，先裁最旧的
+            victims = sorted(cache.items(), key=lambda kv: kv[1].get("seen") or 0)[:excess]
+            for ecid, _entry in victims:
+                cache.pop(ecid, None)
+        alive = set()
+        with self._lock:
+            alive = set(self._update_cache.get("shared") or {})
+        return [rec for rec in records if int(rec.get("ecid") or 0) in alive]
 
     def server_list(self):
         packet = self.request(Op.GET_SERVER_LIST, detail=Detail.FULL)
         return [server_record(tag) for tag in packet.all(Tag.SERVER)]
+
+    def _update_snapshot(self):
+        """发一次 EC_OP_GET_UPDATE，把这一轮的四类条目全部解析并累积进缓存。
+
+        **这是 GET_UPDATE 的唯一发送点。** 增量状态是「按连接」的，谁多发一次，
+        别人那一轮看到的就是下一轮（多半是存根）——共享列表与任务详情会互相打架，
+        表现为其中一方突然拿到一堆空记录。
+
+        返回 {"files","shared","clients","servers"} 四份完整快照。
+        """
+        packet = self.request(Op.GET_UPDATE, detail=Detail.INC_UPDATE)
+        files, shared_tags, client_tags, server_tags = [], [], [], []
+        for tag in packet.children:
+            if tag.name == Tag.PARTFILE:
+                files.append(partfile_record(tag))
+            elif tag.name == Tag.KNOWNFILE:
+                shared_tags.append(tag)
+            elif tag.name == Tag.CLIENT:
+                client_tags.extend(_update_client_child_tags(tag))
+            elif tag.name == Tag.SERVER:
+                server_tags.extend(_update_server_child_tags(tag))
+        # 文件每次请求都带最新状态，直接用；其余三类是增量的，走按连接累积。
+        return {
+            "files": files,
+            "shared": self._merge_update_cache("shared", shared_tags, sharedfile_record),
+            "clients": self._merge_update_cache("clients", client_tags, client_record),
+            "servers": self._merge_update_cache("servers", server_tags, server_record),
+        }
 
     def get_update(self):
         """EC_OP_GET_UPDATE（增量）：文件/客户端/服务器/好友一次性取回。
@@ -1530,19 +1624,23 @@ class ECClient(object):
         CLIENT_NAME 之类的字段），真正的客户端节点挂在容器的 children 里，CLIENT_NAME
         还再往下一层。所以必须遍历容器子节点逐个解析，不能拿顶层容器去判断。
         """
-        packet = self.request(Op.GET_UPDATE, detail=Detail.INC_UPDATE)
-        files, client_tags, server_tags = [], [], []
-        for tag in packet.children:
-            if tag.name == Tag.PARTFILE:
-                files.append(partfile_record(tag))
-            elif tag.name == Tag.CLIENT:
-                client_tags.extend(_update_client_child_tags(tag))
-            elif tag.name == Tag.SERVER:
-                server_tags.extend(_update_server_child_tags(tag))
-        # 文件每次请求都带最新状态，直接用；客户端与服务器是增量的，走按连接累积。
-        clients = self._merge_update_cache("clients", client_tags, client_record)
-        servers = self._merge_update_cache("servers", server_tags, server_record)
-        return {"files": files, "clients": clients, "servers": servers}
+        snapshot = self._update_snapshot()
+        # shared 也一并返回：调用方（任务详情）用不到，但**必须在同一轮里解析**，
+        # 否则下一次 shared_files_fast() 会拿到被推进过的下一轮（存根）。
+        return {"files": snapshot["files"],
+                "clients": snapshot["clients"],
+                "servers": snapshot["servers"],
+                "shared": snapshot["shared"]}
+
+    def _reset_update_cache(self):
+        """清空按连接累积的增量缓存。
+
+        连接重建时必须调：aMule 的增量 tagmap 是**按连接**的，新连接上第一次
+        GET_UPDATE 会重新回全量。沿用旧累积会把上一条连接见过、这次根本没出现的
+        条目当成"还在"。四个类目必须一起清 —— 早先 shared 是懒创建的，
+        漏在字典外面，重连后共享列表会残留已经不属于本机共享的陈旧条目。
+        """
+        self._update_cache = {"files": {}, "clients": {}, "servers": {}, "shared": {}}
 
     def _merge_update_cache(self, kind, tags, build):
         """把这次的增量 tag 合并进按连接累积的缓存，返回该类的完整当前快照。

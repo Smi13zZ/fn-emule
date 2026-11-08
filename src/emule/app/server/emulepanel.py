@@ -17,6 +17,7 @@
     python src/emule/app/server/emulepanel.py --port 17581 --fake-service --var tmp/var
 """
 import argparse
+import heapq
 import ipaddress
 import json
 import mimetypes
@@ -204,18 +205,40 @@ def resolve_version():
 # 调用方最多等 timeout 秒，等不到就抛 EngineTimeout -> 504。
 # --------------------------------------------------------------------------
 class EngineBox(object):
+    """引擎调用队列：单线程串行执行，但**分优先级**、且对后台调用做合并。
+
+    为什么要分优先级：EC 连接严格串行，一次慢调用会把后面所有请求一起拖住。
+    采样线程每 3 秒、通知线程每 5 秒各排一个请求，一旦某个数据请求变慢，
+    后台调用就会在队列里越堆越多 —— 等前面那个慢请求结束，又要连着跑
+    几十个已经过时的采样，把用户点开的页面继续堵在后面。所以：
+      * 用户请求（页面接口）走 PRIO_USER，后台采样/通知走 PRIO_BG；
+      * 后台调用按 key 合并：同一个 key（比如 "sample:overview"）在队列里
+        已有未执行的一份时，直接复用，不再重复入队。
+    这样队列长度天然有界，慢调用结束后也不会被积压的过时请求继续拖住。
+    """
+
+    PRIO_USER = 0
+    PRIO_BG = 1
+
     def __init__(self):
-        self._queue = queue.Queue()
-        self._thread = threading.Thread(target=self._loop, name="engine", daemon=True)
+        self._heap = []
+        self._seq = 0
+        self._cond = threading.Condition()
+        self._pending = {}          # key -> box，用于后台调用合并
         self._closed = False
+        self._thread = threading.Thread(target=self._loop, name="engine", daemon=True)
         self._thread.start()
 
     def _loop(self):
         while True:
-            item = self._queue.get()
-            if item is None:
-                return
-            fn, args, kwargs, box = item
+            with self._cond:
+                while not self._heap and not self._closed:
+                    self._cond.wait()
+                if self._closed and not self._heap:
+                    return
+                _, _, _, key, fn, args, kwargs, box = heapq.heappop(self._heap)
+                if key is not None:
+                    self._pending.pop(key, None)
             try:
                 box["value"] = fn(*args, **kwargs)
                 box["ok"] = True
@@ -224,23 +247,49 @@ class EngineBox(object):
             finally:
                 box["done"].set()
 
-    def call(self, fn, args=(), kwargs=None, timeout=DATA_TIMEOUT):
+    def call(self, fn, args=(), kwargs=None, timeout=DATA_TIMEOUT,
+             priority=PRIO_USER, key=None):
+        """排一个引擎调用并等结果。
+
+        priority / key 只对后台调用有意义：同 key 且仍在排队的调用会合并成一次，
+        调用方各自等自己那份结果（拿到的是同一次执行的结果）。
+        """
         if self._closed:
             raise ServiceMissing("引擎组件已关闭")
+        kwargs = kwargs or {}
         box = {"done": threading.Event(), "ok": False, "value": None, "exc": None}
-        self._queue.put((fn, args, kwargs or {}, box))
+        with self._cond:
+            if key is not None:
+                existing = self._pending.get(key)
+                if existing is not None:
+                    # 已经有一份同样的后台调用在排队：直接等它，不再入队
+                    box = existing
+                else:
+                    self._pending[key] = box
+                    self._push_locked(priority, key, fn, args, kwargs, box)
+            else:
+                self._push_locked(priority, None, fn, args, kwargs, box)
         if not box["done"].wait(max(0.1, float(timeout))):
             raise EngineTimeout("引擎响应超时")
         if not box["ok"]:
             raise box["exc"] if box["exc"] is not None else RuntimeError("引擎调用失败")
         return box["value"]
 
+    def _push_locked(self, priority, key, fn, args, kwargs, box):
+        self._seq += 1
+        heapq.heappush(self._heap,
+                       (priority, self._seq, id(box), key, fn, args, kwargs, box))
+        self._cond.notify()
+
+    def pending(self):
+        """队列里还有多少个调用在等（诊断用）。"""
+        with self._cond:
+            return len(self._heap)
+
     def close(self):
         self._closed = True
-        try:
-            self._queue.put(None)
-        except Exception:
-            pass
+        with self._cond:
+            self._cond.notify_all()
 
 
 # --------------------------------------------------------------------------
@@ -690,16 +739,20 @@ class Runtime(object):
     def call(self, method, *args, **kwargs):
         """调一个引擎方法，把各类异常翻译成面板异常。
 
-        kwargs 里的 timeout 是面板侧的等待预算（秒），不传给引擎方法。
+        kwargs 里的 timeout 是面板侧的等待预算（秒），priority / coalesce_key
+        是队列调度参数，这三个都不传给引擎方法本身。
         """
         if self.service is None or self.engine_box is None:
             raise ServiceMissing("引擎组件不可用（core.service 未加载）")
         timeout = float(kwargs.pop("timeout", DATA_TIMEOUT))
+        priority = kwargs.pop("priority", EngineBox.PRIO_USER)
+        coalesce_key = kwargs.pop("coalesce_key", None)
         fn = getattr(self.service, method, None)
         if fn is None:
             raise ServiceMissing("引擎接口缺失：%s" % method)
         try:
-            return self.engine_box.call(fn, args, kwargs, timeout=timeout)
+            return self.engine_box.call(fn, args, kwargs, timeout=timeout,
+                                        priority=priority, key=coalesce_key)
         except EngineTimeout:
             raise
         except self.err_timeout as exc:  # EmuleTimeout：引擎在跑，只是没按时回包
@@ -808,7 +861,11 @@ class Runtime(object):
             if self.service is None:
                 continue
             try:
-                data = self.call("overview", timeout=8.0)
+                # 后台优先级 + 按 key 合并：引擎忙的时候不会在队列里堆几十个
+                # 过时的采样请求，把用户刚打开的页面堵在后面。
+                data = self.call("overview", timeout=8.0,
+                                 priority=EngineBox.PRIO_BG,
+                                 coalesce_key="bg:sample:overview")
                 speed = as_dict(as_dict(data).get("speed"))
                 self.store.push_history(int(speed.get("down") or 0), int(speed.get("up") or 0))
                 self._sample_miss = 0
@@ -835,7 +892,9 @@ class Runtime(object):
         if not cfg.get("enabled"):
             return
         try:
-            data = self.call("transfers", "download", timeout=10.0)
+            data = self.call("transfers", "download", timeout=10.0,
+                             priority=EngineBox.PRIO_BG,
+                             coalesce_key="bg:notify:downloads")
         except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing):
             self._notify_miss += 1
             if self._notify_miss in (1, 60):
@@ -2559,16 +2618,33 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/shared":
             self.require_method(method, "GET")
-            data = as_dict(RT.call("shared"))
+            # ?force=1 跳过内存缓存，重新向引擎要一次（页面上手动刷新用）
+            force = str((query.get("force") or ["0"])[0]).lower() in ("1", "true", "yes")
+            data = as_dict(RT.call("shared", force=force))
             items = as_list(data.get("items"))
             payload = {"items": items, "total": int_or(data.get("total"), len(items))}
             # 扫描范围：配置了几个根目录 / 实际摊平出多少个待扫目录。
             # 共享页拿它显示一行说明，用户能自己看出"是不是没扫到子目录"。
+            # 这个只读本地目录树、不碰引擎，放在引擎调用之外更省一次往返。
             try:
                 payload["scan"] = as_dict(RT.call("shared_scan_summary", timeout=8.0))
             except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing):
                 payload["scan"] = {}     # 诊断信息拿不到不该让共享列表整体失败
+            try:
+                payload["progress"] = as_dict(RT.call("shared_progress", timeout=5.0))
+            except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing):
+                payload["progress"] = {}
             self.send_json(payload)
+            return
+
+        if path == "/api/shared/progress":
+            # 扫描进度单独开一条路：共享页在扫描期间高频轮询它，
+            # 不必每次都把几万条的完整列表拉一遍。
+            self.require_method(method, "GET")
+            try:
+                self.send_json(RT.call("shared_progress", timeout=5.0))
+            except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing) as exc:
+                self.send_json({"running": False, "shared_total": 0, "error": str(exc)})
             return
 
         if path == "/api/shared/reload":
@@ -2729,8 +2805,11 @@ class Handler(BaseHTTPRequestHandler):
                     warnings.append("引擎未运行，设置已保存，将在引擎启动后生效")
                 except (EngineTimeout, EngineFailure, ServiceMissing) as exc:
                     warnings.append("应用引擎偏好失败：%s" % (exc,))
+                # 共享目录不需要重启引擎：core 那边已经把摊平清单落盘并单发了
+                # RELOAD，当场就会按新目录重扫。这里再标"要重启"只会让用户
+                # 以为改了没生效，白重启一次引擎（还把正在下的任务打断）。
                 for key in ("tcp_port", "udp_port", "ec_port", "incoming_dir", "temp_dir",
-                            "shared_dirs", "ipfilter", "ec_password", "upnp"):
+                            "ipfilter", "ec_password", "upnp"):
                     if key in engine_patch:
                         restart_required = True
             RT.log("设置已更新：%s" % (", ".join(sorted(changed)) or "无变化"))

@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>eMule</title>
 <link rel="icon" href="./images/icon.svg">
-<link rel="stylesheet" href="./style.css?v=26.11.50">
+<link rel="stylesheet" href="./style.css?v=26.11.51">
 </head>
 <body>
 <div id="app" v-cloak>
@@ -647,7 +647,14 @@
           <span class="chip warn" v-if="sharedData.scan && sharedData.scan.truncated" :title="t('shared.scanTruncatedHint')">
             {{ t('shared.scanTruncated') }}
           </span>
+          <span class="chip warn" v-if="sharedProgress.running">
+            {{ t('shared.scanRunning', { n: sharedProgress.engine_count || 0 }) }}
+          </span>
           <div class="spacer"></div>
+          <button class="btn" @click="refreshShared">
+            <span class="ic" v-html="ic('refresh')"></span>
+            {{ t('shared.refresh') }}
+          </button>
           <button class="btn" :disabled="sharedReloading" @click="reloadShared">
             <span class="ic" v-html="ic(sharedReloading ? 'refresh' : 'list')"></span>
             {{ sharedReloading ? t('shared.reloading') : t('shared.reload') }}
@@ -1905,10 +1912,10 @@
 </div>
 
 <script src="./lib/vue.global.prod.js"></script>
-<script src="./js/i18n.js?v=26.11.0"></script>
-<script src="./js/util.js?v=26.11.0"></script>
-<script src="./js/api.js?v=26.11.0"></script>
-<script src="./js/charts.js?v=26.11.0"></script>
-<script src="./js/app.js?v=26.11.0"></script>
+<script src="./js/i18n.js?v=26.11.51"></script>
+<script src="./js/util.js?v=26.11.51"></script>
+<script src="./js/api.js?v=26.11.51"></script>
+<script src="./js/charts.js?v=26.11.51"></script>
+<script src="./js/app.js?v=26.11.51"></script>
 </body>
 </html>

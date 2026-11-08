@@ -193,6 +193,27 @@ def main():
         raise SystemExit("结构检查失败，已中止打包")
     print("       结构正常")
 
+    # 回归闸门：这几条是踩过的坑，语法与结构检查都抓不到 —— 它们只在真实负载下
+    # 才暴露（共享库一大，页面就整块 504）。放进打包流程，避免改了别处又退回去。
+    print("[0c/3] 回归测试（共享取数 / 目录清单 / 引擎队列）")
+    unit_dir = os.path.join(ROOT, "tmp", "_unit")
+    unit_tests = ["test_version_consistency.py", "test_shared_fast.py",
+                  "test_shareddir_guard.py", "test_shared_cache.py",
+                  "test_engine_priority.py", "test_expand.py",
+                  "test_reload_async.py", "test_shareddir_idempotent.py"]
+    for name in unit_tests:
+        path = os.path.join(unit_dir, name)
+        if not os.path.isfile(path):
+            print("       跳过（不存在）：%s" % name)
+            continue
+        res = subprocess.run([sys.executable, path], capture_output=True, text=True,
+                             encoding="utf-8", errors="replace")
+        if res.returncode != 0:
+            sys.stderr.write(res.stdout or "")
+            sys.stderr.write(res.stderr or "")
+            raise SystemExit("回归测试失败（%s），已中止打包" % name)
+        print("       通过：%s" % name)
+
     platforms = [p.strip() for p in args.platforms.split(",") if p.strip()]
     for p in platforms:
         if p not in PLATFORM_ARCH:

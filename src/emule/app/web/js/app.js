@@ -172,8 +172,11 @@
         downloadingResults: false,
         searchTimer: null,
 
-        sharedData: { items: [], total: 0, scan: {} },
+        sharedData: { items: [], total: 0, scan: {}, progress: {} },
         sharedReloading: false,
+        // 扫描进行中时后台轮询进度用
+        sharedScanTimer: null,
+        sharedProgress: { running: false, engine_count: 0, shared_total: 0, scan_dirs: 0 },
 
         statsData: { groups: [], items: [] },
         diag: null,
@@ -636,6 +639,7 @@
       clearInterval(this.searchTimer);
       clearInterval(this.installTimer);
       clearInterval(this._updateTimer);
+      this.stopSharedScanWatch();
       document.removeEventListener("visibilitychange", this._onVisibility);
       window.removeEventListener("resize", this._onResize);
       if (this._mq && this._onScheme) {
@@ -1258,10 +1262,13 @@
       },
 
       /* ---------------- shared ---------------- */
-      loadShared: async function () {
+      loadShared: async function (force) {
         try {
-          const d = await window.EMU_API.shared();
-          this.sharedData = d || { items: [], total: 0, scan: {} };
+          const d = await window.EMU_API.shared(!!force);
+          this.sharedData = d || { items: [], total: 0, scan: {}, progress: {} };
+          this.sharedProgress = (d && d.progress) || { running: false };
+          // 后台扫描还在跑就跟着轮询，页面自己会看到条数往上涨
+          if (this.sharedProgress.running) this.startSharedScanWatch();
         } catch (e) {
           this.fail("err.loadFailed", e);
         }
@@ -1270,17 +1277,54 @@
         if (this.sharedReloading) return;
         this.sharedReloading = true;
         try {
-          await window.EMU_API.sharedReload();
-          // 目录多的时候 aMule 侧要扫一阵才扫完，等两秒再拉列表，
-          // 免得刚点完就显示旧条数、看起来像"没生效"。
-          await new Promise(function (resolve) { setTimeout(resolve, 2000); });
-          await this.loadShared();
-          this.ok("shared.reloadOk");
+          const r = await window.EMU_API.sharedReload();
+          // 后端已经改成「发完就返回」，扫描在后台继续。这里必须自己轮询进度：
+          // 以前固定等 2 秒再拉一次列表就再也不管了，目录一大用户看到的就是
+          // 「点了没反应」「数字一直不动」。
+          this.sharedProgress = {
+            running: true,
+            scan_dirs: (r && r.scan_dirs) || 0,
+            shared_dirs: (r && r.shared_dirs) || 0,
+          };
+          this.ok("shared.scanStarted");
+          await this.loadShared(true);
+          this.startSharedScanWatch();
         } catch (e) {
           this.fail("err.opFailed", e);
         } finally {
           this.sharedReloading = false;
         }
+      },
+      startSharedScanWatch: function () {
+        if (this.sharedScanTimer) return;
+        const self = this;
+        this.sharedScanTimer = setInterval(async function () {
+          try {
+            const p = await window.EMU_API.sharedProgress();
+            self.sharedProgress = p || { running: false };
+            if (p && p.running) {
+              // 扫描期间把列表一起刷新，用户能直接看到文件一个个进来
+              const d = await window.EMU_API.shared(true);
+              if (d) self.sharedData = d;
+            } else {
+              self.stopSharedScanWatch();
+              // 收尾再取一次完整列表（最后一次快照可能还没落缓存）
+              await self.loadShared(true);
+            }
+          } catch (e) {
+            self.stopSharedScanWatch();
+          }
+        }, 4000);
+      },
+      stopSharedScanWatch: function () {
+        if (this.sharedScanTimer) {
+          clearInterval(this.sharedScanTimer);
+          this.sharedScanTimer = null;
+        }
+      },
+      refreshShared: async function () {
+        await this.loadShared(true);
+        this.ok("shared.reloadOk");
       },
 
       /* ---------------- stats ---------------- */

@@ -654,6 +654,12 @@ class EmuleService(object):
         # 持久层：只用来读写 var/added.json（添加时间）。没传入就按 var_dir 自建一个，
         # 这样单测 / 其它调用方也能用到同一份记录，不必强依赖 panel 的 Store 实例。
         self._added_store_ref = store
+        # 共享列表快照缓存：{at, payload}；扫描进行中由后台线程刷新
+        self._shared_cache = None
+        # 后台刷新是否正在进行（去抖用）
+        self._shared_refreshing = False
+        # 共享扫描进度：{running, started_at, baseline, current, roots, scan_dirs, ...}
+        self._shared_scan = None
 
     # ------------------------------------------------------------ 设置
     def _settings(self):
@@ -781,7 +787,30 @@ class EmuleService(object):
                 self._ec = None                        # 新进程要新建连接
         self._ctl.start_watchdog()
         self.start_background_bootstrap()
+        # 引擎启动时会按 shareddir.dat 重扫一遍共享目录，新文件要排哈希。
+        # 这里跟上一个进度跟踪，页面就不会在"重启之后"看不到扫描状态
+        # （否则用户重启完看到的还是静止的条数，以为卡住了）。
+        self.start_initial_shared_scan()
         return None
+
+    def start_initial_shared_scan(self):
+        """引擎启动后跟一下共享扫描进度（幂等，失败不影响启动）。"""
+        try:
+            engine = self._engine_settings()
+            roots = [path for path in (engine.get("shared_dirs") or []) if path]
+            if not roots:
+                return False
+            with self._lock:
+                scan = self._shared_scan
+                if scan and scan.get("running"):
+                    return False
+            self._start_shared_scan(self.shared_engine_count(), len(roots),
+                                    len(expand_shared_dirs(roots)))
+            return True
+        except (EmuleOffline, EmuleTimeout, EmuleError):
+            return False
+        except Exception:                              # noqa: BLE001 - 启动路径绝不能因此失败
+            return False
 
     def start_background_bootstrap(self):
         """后台补齐引导文件（幂等）。启动路径不等待它。"""
@@ -1738,9 +1767,115 @@ class EmuleService(object):
         }
 
     # ------------------------------------------------------------ 共享
-    def shared(self):
+    #: 共享列表快照在内存里缓存这么久（秒）。共享列表只在重扫 / 增删目录时变化，
+    #: 没必要每开一次页面就打一次引擎 —— 大库里那次调用是 O(N) 的几万条回包。
+    SHARED_CACHE_TTL = 15.0
+    #: 重扫后等这么久再取第一次快照（aMule 侧扫完目录才会把文件交给哈希队列）
+    SHARED_RELOAD_SETTLE = 3.0
+    #: 扫描进行中时，按这个间隔刷新快照（让页面看得到条数在涨）
+    SHARED_PROGRESS_INTERVAL = 5.0
+    #: 连续这么多轮（× PROGRESS_INTERVAL）条数没变化就认为扫描结束
+    SHARED_SCAN_IDLE_ROUNDS = 12
+
+    def _shared_cache_get(self):
+        """取缓存的 payload（**不是** {at, payload} 整个条目）。
+
+        调用方直接把这个返回值当 /api/shared 的响应体用，所以这里必须只返回
+        payload；返回整个条目会让上层读不到 items/total，页面条数恒为 0。
+        """
+        with self._lock:
+            entry = self._shared_cache
+            if not entry:
+                return None
+            if time.time() - entry["at"] > self.SHARED_CACHE_TTL:
+                return None
+            return entry.get("payload")
+
+    def _shared_cache_any(self):
+        """拿缓存里的旧快照（**不看 TTL**），没有就返回 None。
+
+        给 stale-while-revalidate 用：引擎忙的时候宁可给一份稍旧的列表，
+        也不要让页面等满 15 秒变成 504。
+        """
+        with self._lock:
+            entry = self._shared_cache
+            if not entry:
+                return None
+            payload = entry.get("payload")
+            if not payload or not payload.get("items"):
+                return None
+            return payload
+
+    def _schedule_shared_refresh(self):
+        """后台刷新一次共享快照（去抖：已在跑的就不再起新的）。
+
+        配合 stale-while-revalidate：请求先拿到旧快照立刻返回，刷新在后台做，
+        这样引擎再忙也不会把页面拖成 504。
+        """
+        with self._lock:
+            if self._shared_refreshing:
+                return
+            self._shared_refreshing = True
+
+        def run():
+            try:
+                self.shared(force=True)
+            except EmuleError:
+                pass
+            except Exception:                       # noqa: BLE001 - 后台线程不能炸
+                pass
+            finally:
+                with self._lock:
+                    self._shared_refreshing = False
+
+        threading.Thread(target=run, name="shared-refresh", daemon=True).start()
+
+    def _shared_cache_put(self, payload):
+        with self._lock:
+            self._shared_cache = {"at": time.time(), "payload": payload}
+        return payload
+
+    def _shared_cache_drop(self):
+        with self._lock:
+            self._shared_cache = None
+
+    def shared_engine_count(self):
+        """引擎自己报的「当前共享文件数」—— 一次 STAT_REQ 就够，O(1)。
+
+        这是判断"扫描有没有在推进"最便宜的信号：shared() 的完整列表是
+        O(N) 的大回包，而这个计数只要几十字节。
+        """
         client = self._online_client()
-        records = client.shared_files()
+        stats = client.stat_request(timeout=8.0)
+        return int(stats.get("shared_files") or 0)
+
+    def shared(self, force=False):
+        """共享文件列表。
+
+        取数走 O(N) 的 GET_UPDATE（见 ECClient.shared_files_fast），不再用
+        O(N²) 的 GET_SHARED_FILES —— 后者在 2 万文件时要 15 秒，正好撞上面板
+        自己的 15 秒超时上限，会让整个共享页连同其它接口一起 504。
+        结果在内存里缓存 SHARED_CACHE_TTL 秒，扫描进行中按
+        SHARED_PROGRESS_INTERVAL 刷新，页面就能看到条数在涨。
+        """
+        if not force:
+            cached = self._shared_cache_get()
+            if cached is not None:
+                return cached
+            # 缓存过期/为空，但**手上还有一份旧快照**：先立刻把它给出去，
+            # 别再从头等引擎。引擎正卡在重扫 / 哈希大目录时，一次 GET_UPDATE
+            # 就可能等满 15 秒预算，把用户点开的页面直接变成 504。
+            # 旧快照只是"上一次的条数"，比白屏或超时有用得多；
+            # 真正的刷新交给下一步的 force 调用或后台扫描线程。
+            stale = self._shared_cache_any()
+            if stale is not None:
+                # 同时后台刷新一次，避免一直吐旧数据（下一个请求就能拿到新的）
+                self._schedule_shared_refresh()
+                return stale
+        client = self._online_client()
+        # 传引擎自报的条数进去，让 EC 层把已经不存在的旧条目裁掉
+        # （增量回包没有"删除"信号，换过共享目录后旧条目会一直挂着）。
+        records = client.shared_files_fast_synced(self.shared_engine_count())
         items = []
         for record in records:
             size = int(record.get("size") or 0)
@@ -1764,7 +1899,21 @@ class EmuleService(object):
                 "ed2k_link": record.get("ed2k_link") or "",
             })
         items.sort(key=lambda entry: entry["name"].lower())
-        return {"items": items, "total": len(items)}
+        payload = {"items": items, "total": len(items)}
+        # 空列表不覆盖已有缓存：引擎刚重连 / 重扫期间，GET_UPDATE 的这一轮
+        # 可能还没把全量送过来（回的都是存根），此时解析结果是空的。
+        # 把空结果写进缓存会让页面瞬间清空，看起来像"共享文件全没了"。
+        # 真清空了的话 engine_count 也是 0，下一次 force 刷新自然会把空列表带回来。
+        if items:
+            return self._shared_cache_put(payload)
+        with self._lock:
+            stale = self._shared_cache
+        if stale and (stale.get("payload") or {}).get("items"):
+            # 有旧的非空快照就沿用（并刷新时间戳，避免马上过期又打到引擎）
+            with self._lock:
+                stale["at"] = time.time()
+            return stale["payload"]
+        return self._shared_cache_put(payload)
 
     @staticmethod
     def _shared_priority(raw):
@@ -1773,23 +1922,127 @@ class EmuleService(object):
         return {0: "low", 1: "normal", 2: "high", 3: "high", 4: "low", 5: "auto"}.get(raw, "normal")
 
     def shared_reload(self):
-        """重新扫描共享目录。
+        """触发共享目录重扫，**立刻返回**，扫描在后台继续。
 
         先重写 shareddir.dat：aMule 只扫每个目录的顶层，子目录必须由面板摊平
         进清单（见 AmuleCtl.conf_text / expand_shared_dirs）。只发
         SHAREDFILES_RELOAD 而不重写清单的话，用户新加的子目录永远不会被看到，
         表现就是"明明有上千个文件，扫到几百个就停了"。
+
+        发 RELOAD 本身是 fire-and-forget；但真正让页面"卡住"的是随后取列表那次
+        O(N²) 的 GET_SHARED_FILES（已改走 O(N) 的 GET_UPDATE），以及
+        **文件哈希要排很久**：aMule 把新文件交给单线程的 CThreadScheduler 逐个算
+        MD4+AICH，几万个文件要跑很久，这期间共享条数只按「已算完」增长。
+        所以这里把"等扫描推进"做成后台任务 + 可查询进度，页面轮询 shared_progress()
+        就能看到条数在涨，而不是点了没反应。
         """
-        client = self._online_client()
-        self._ctl.write_shareddir(self._engine_settings())
-        client.sharedfiles_reload()
         engine = self._engine_settings()
-        expanded = len(expand_shared_dirs(engine.get("shared_dirs") or []))
+        roots = [path for path in (engine.get("shared_dirs") or []) if path]
+        expanded = expand_shared_dirs(roots)
+        client = self._online_client()
+        # 先写清单再下发：顺序反过来的话引擎读到的是上一版目录树。
+        self._ctl.write_shareddir(engine)
+        baseline = self.shared_engine_count()
+        client.sharedfiles_reload()
+        # **故意不 drop 快照**：重扫期间引擎主线程被 Reload() 占着，此时任何
+        # 一次 GET_UPDATE 都可能等满 15 秒 → 504。留着旧快照，页面在扫描期间
+        # 至少还能看到上一次的列表，配合 _shared_cache_any() 的 stale-while-revalidate，
+        # 这段时间的请求全都秒回。新数据由后台扫描线程逐步刷新进缓存。
+        # （曾经在这里 drop，导致点"重新扫描"后第一个请求必然 504。）
+        self._start_shared_scan(baseline, len(roots), len(expanded))
         return {
             "ok": True,
-            "message": "已请求重新扫描共享目录",
-            "shared_dirs": len(engine.get("shared_dirs") or []),
-            "scan_dirs": expanded,
+            "message": "已开始重新扫描共享目录",
+            "shared_dirs": len(roots),
+            "scan_dirs": len(expanded),
+            "scanning": True,
+        }
+
+    # -- 共享扫描进度（后台任务）------------------------------------------
+    def _start_shared_scan(self, baseline, roots, scan_dirs):
+        with self._lock:
+            self._shared_scan = {
+                "running": True,
+                "started_at": int(time.time()),
+                "baseline": int(baseline),
+                "current": int(baseline),
+                "roots": int(roots),
+                "scan_dirs": int(scan_dirs),
+                "last_change_at": int(time.time()),
+                "error": "",
+            }
+        thread = threading.Thread(target=self._shared_scan_loop,
+                                  name="shared-scan", daemon=True)
+        thread.start()
+
+    def _shared_scan_loop(self):
+        """后台跟随扫描进度，直到条数不再增长且引擎侧已稳定。
+
+        终止判定不能只看"涨没涨"：aMule 的哈希队列是单线程的，一个几万文件的
+        目录可以先扫完目录、再花几十分钟逐个哈希，中间会有长时间条数不变。
+        所以用两个信号组合：
+          * 条数不再增长，且
+          * 连续 SHARED_SCAN_IDLE_ROUNDS 轮（默认约 1 分钟）都没变化
+        才认为扫描结束。期间持续刷新缓存，页面每次拉列表都能看到最新条数。
+        """
+        idle = 0
+        current = None
+        while idle < self.SHARED_SCAN_IDLE_ROUNDS:
+            time.sleep(self.SHARED_PROGRESS_INTERVAL)
+            try:
+                count = self.shared_engine_count()
+            except (EmuleOffline, EmuleTimeout):
+                # 引擎正在忙或短暂离线：不算进展，也不算失败，下一轮再看
+                idle += 1
+                continue
+            except EmuleError:
+                idle += 1
+                continue
+            with self._lock:
+                scan = self._shared_scan
+                if not scan or not scan.get("running"):
+                    return
+                scan["current"] = int(count)
+                if current is not None and count > current:
+                    scan["last_change_at"] = int(time.time())
+                    idle = 0
+                else:
+                    idle += 1
+                finished = idle >= self.SHARED_SCAN_IDLE_ROUNDS
+                if finished:
+                    scan["running"] = False
+                roots = scan["roots"]
+                scan_dirs = scan["scan_dirs"]
+                baseline = scan["baseline"]
+            current = count
+            try:
+                # 顺带把缓存刷新成最新快照，页面就不用等 TTL 过期
+                self.shared(force=True)
+            except EmuleError:
+                pass
+            if finished:
+                return
+
+    def shared_progress(self):
+        """扫描进度快照，给共享页轮询用。"""
+        with self._lock:
+            scan = dict(self._shared_scan or {})
+            cached = self._shared_cache or {}
+        if not scan:
+            return {"running": False, "scanned": 0, "scan_dirs": 0,
+                    "shared_total": 0, "started_at": 0, "idle_seconds": 0}
+        payload = cached.get("payload") or {}
+        total = int(payload.get("total") or 0) if payload else 0
+        return {
+            "running": bool(scan.get("running")),
+            "started_at": int(scan.get("started_at") or 0),
+            "shared_dirs": int(scan.get("roots") or 0),
+            "scan_dirs": int(scan.get("scan_dirs") or 0),
+            "baseline": int(scan.get("baseline") or 0),
+            "engine_count": int(scan.get("current") or 0),
+            "shared_total": total,
+            "idle_seconds": int(time.time()) - int(scan.get("last_change_at") or 0),
+            "error": str(scan.get("error") or ""),
         }
 
     # ------------------------------------------------------------ 维护
@@ -2236,12 +2489,25 @@ class EmuleService(object):
             directories.append(_tag_string(Tag.DIRECTORIES_TEMP, patch["temp_dir"]))
             applied.append("temp_dir")
             restart_required.append("temp_dir")
-        if isinstance(patch.get("shared_dirs"), (list, tuple)):
-            shared = list(patch["shared_dirs"])
-            container = _tag_uint(Tag.DIRECTORIES_SHARED, len(shared))
-            for path in shared:
-                container.children.append(_tag_string(Tag.STRING, path))
-            directories.append(container)
+        # shared_dirs 故意**不走 EC**，只由 write_shareddir() 写文件 + 单发 RELOAD 生效。
+        #
+        # 原因（aMule 2.3.3 源码确认）：EC_OP_SET_PREFERENCES 在引擎侧会
+        #   glob_prefs->shareddir_list = <EC 传来的列表>   (ECSpecialMuleTags.cpp Apply())
+        #   glob_prefs->Save()                             (ExternalConn.cpp EC 分支)
+        # 而 daemon 构建下 Save() 会用这份内存列表**整个重写 shareddir.dat**
+        # （Preferences.cpp:1477-1482）；偏偏 FindSharedFiles() 的第一步就是从
+        # shareddir.dat 重读目录（SharedFileList.cpp:320）。于是只要用 EC 发一次
+        # shared_dirs —— 无论发根目录还是发摊平后的长清单 —— 都会把磁盘上那份摊平清单
+        # 覆盖掉，下次重扫读到的就是被覆盖的版本，"扫到几百个就停"的毛病重新出现。
+        # 所以这里什么都不发：目录变更走 write_conf()/write_shareddir() + RELOAD。
+        #
+        # 注意 dirs_changed 与 restart_required 是**两件事**：
+        #   * 目录改了要把新清单落盘（需要走下面的 write_conf 分支）；
+        #   * 但不需要重启引擎 —— 落盘后单发 RELOAD 就会按新清单重扫。
+        # 早先这里把 shared_dirs 塞进 restart_required 只是为了骗出 write_conf，
+        # 结果面板据此提示"要重启"，多了一次完全没必要的引擎重启。
+        dirs_changed = isinstance(patch.get("shared_dirs"), (list, tuple))
+        if dirs_changed:
             applied.append("shared_dirs")
         if "ipfilter" in patch:
             enabled = bool(patch["ipfilter"])
@@ -2275,8 +2541,9 @@ class EmuleService(object):
         if nodes:
             client = self._online_client()
             client.set_prefs(nodes)
-        # 端口 / 目录 / UPnP 这类要落到 amule.conf，下次启动生效
-        if restart_required:
+        # 端口 / 目录 / UPnP 这类要落到 amule.conf
+        # dirs_changed 也要进来：共享目录虽不用重启，但清单必须落盘。
+        if restart_required or dirs_changed:
             engine = self._engine_settings()
             merged = dict(engine)
             for key in ("tcp_port", "udp_port", "incoming_dir", "temp_dir", "shared_dirs",
@@ -2285,7 +2552,26 @@ class EmuleService(object):
                         "ec_port", "ec_password"):
                 if key in patch and patch[key] not in (None, ""):
                     merged[key] = patch[key]
+            # write_conf 会连 shareddir.dat 一起重写（摊平后的清单），顺序必须在
+            # set_prefs 之后 —— 见上面 shared_dirs 分支的注释。写在前面会被引擎
+            # 的 glob_prefs->Save() 覆盖回去。
             self._ctl.write_conf(merged)
+        if dirs_changed:
+            # 目录变了：旧快照立即作废，并**当场触发重扫**。
+            # 共享目录不需要等引擎重启 —— write_conf() 已经把摊平清单落盘，
+            # 单发一次 SHAREDFILES_RELOAD 引擎就会按新清单重扫。
+            self._shared_cache_drop()
+            try:
+                client = self._online_client()
+                client.sharedfiles_reload()
+                self._start_shared_scan(self.shared_engine_count(), 
+                                        len(patch["shared_dirs"]),
+                                        len(expand_shared_dirs(patch["shared_dirs"])))
+            except (EmuleOffline, EmuleTimeout):
+                # 引擎没在跑：清单已经落盘，下次启动 prepare() 会按新清单生效
+                pass
+            except EmuleError:
+                pass
         return {
             "ok": True,
             "applied": applied,

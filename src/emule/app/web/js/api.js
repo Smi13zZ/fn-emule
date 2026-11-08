@@ -127,7 +127,10 @@
     kadBootstrap: function () { return request(BASE + "/kad/bootstrap", { method: "POST", body: {} }); },
 
     /* ---- shared files ---- */
-    shared: function () { return request(BASE + "/shared"); },
+    shared: function (force) {
+      return request(BASE + "/shared" + (force ? "?force=1" : ""));
+    },
+    sharedProgress: function () { return request(BASE + "/shared/progress"); },
     sharedReload: function () { return request(BASE + "/shared/reload", { method: "POST", body: {} }); },
 
     /* ---- search ---- */
