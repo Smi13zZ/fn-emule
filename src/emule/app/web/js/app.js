@@ -235,10 +235,18 @@
         updateInstalling: false,
         updateError: "",
         updateInstallDetail: "",
+        /* 全局失败提示条：从任意页面发起更新都可能失败，那时用户不在设置页，
+           只在设置卡片里显示等于什么都没说。带「查看详情」并单独可关。 */
+        updateFailText: "",
         /* 全局更新提示条：发现新版本后在每个页面顶部提示，关掉后本次会话不再出现 */
         updateBanner: true,
         /* 一键更新的下载进度（后台任务轮询回来的） */
         updateProgress: { percent: 0, phase: "idle", received: 0, total: 0 },
+        /* 服务端每次尝试递增的编号。失败状态在服务端会一直留着，界面靠它
+           区分「上一轮的死信」与「本轮真的失败了」。 */
+        updateAttempt: 0,
+        /* 这次升级有没有备好回滚包。false 时提示不能继续承诺「会自动回滚」。 */
+        updateRollbackReady: false,
         /* 上一次发起版本检查的时刻（毫秒）。切回窗口时按它判断要不要补查 */
         lastUpdateCheckAt: 0,
         /* 正在更新到的目标版本号，用于弹窗标题 */
@@ -2244,52 +2252,105 @@
       },
       /* 一键更新：面板在后台下载 + 校验 + 生成升级脚本，这里轮询进度。
          弹窗一直留着，直到面板被新版本替换、页面自动重连成功为止。 */
+      dismissUpdateFail: function () {
+        this.updateFailText = "";
+      },
       runInstall: async function () {
         if (this.updateInstalling) return;
         this.updateInstalling = true;
         this.updateError = "";
-        this.updateProgress = { percent: 0, phase: "downloading", received: 0, total: 0 };
-        this.updateInstallDetail = this.t("settings.update.installingDownload");
+        this.updateFailText = "";
+        this.updateProgress = { percent: 0, phase: "checking", received: 0, total: 0 };
+        this.updateInstallDetail = this.t("settings.update.checking");
         this.updateTargetVersion = (this.updateInfo && this.updateInfo.latest) || "";
         this._updateFromVersion = this.appVersion;
+        /* 一开机就轮询，第一次读到的还可能是上一轮留下的 failed；只有真的看到过
+           下载/安装过程，后面的 idle 才能当成「装完又退回来了」。 */
+        this._updateSawActive = false;
+        /* 上一次尝试的失败状态还在服务端存着（它不会自己回 idle），而这一轮
+           的安装请求要先把阶段置成 checking 才改编号。不记住旧编号的话，第一个
+           轮询就会读到上一轮的死信，弹窗当场关掉、报的还是上次的原因。
+           这里先单独读一次编号当基线：页面刚打开时内存里还没有任何编号，
+           靠安装请求的返回值又太晚。 */
+        this._updateIgnoreAttempt = this.updateAttempt || 0;
         try {
-          const r = await window.EMU_API.installUpdate();
-          if (r && r.ok === false) throw new Error(r.error || "");
+          const base = await window.EMU_API.updateProgress();
+          if (base && typeof base.attempt === "number") {
+            this._updateIgnoreAttempt = base.attempt;
+            this.updateAttempt = base.attempt;
+          }
+        } catch (e) { /* 读不到就退回内存里的值 */ }
+        /* 轮询必须先起来，再发安装请求：后端在这个请求之后才在后台线程里干活，
+           await 期间一个字节都不会回报，等它返回才转向询的话，下载阶段
+           一个进度都看不到。 */
+        this.pollUpdateProgress(this._updateFromVersion);
+        try {
+          const r = await window.EMU_API.installUpdate(this.updateInfo || null);
+          if (r && r.ok === false) throw this._refusal(r);
+          if (typeof r.attempt === "number") this.updateAttempt = r.attempt;
           if (r && r.task) this.applyUpdateTask(r.task);
-          this.pollUpdateProgress(r && r.version ? r.version : "");
         } catch (e) {
+          clearTimeout(this.installTimer);
           this.updateInstalling = false;
-          this.updateError = this.t("settings.update.installFailed", { v: (e && e.message) || "" });
+          /* api.js 把非 2xx 的响应体挂在 err.payload 上，服务端的 code 在那里 */
+          const body = (e && e.payload) || {};
+          this.failInstall({
+            code: (e && e.code) || body.code || "",
+            arg: (e && e.arg) || body.latest || "",
+            rollback: body.rollback,
+            message: (e && e.message) || "",
+          });
         }
       },
+      /* 服务端拒绝时下发的是语言中立的 code，界面自己翻译；只给中文文本的
+         旧服务端仍按原文显示。 */
+      _refusal: function (res) {
+        const err = new Error((res && res.error) || "install failed");
+        err.code = (res && res.code) || "";
+        err.arg = (res && res.latest) || "";
+        err.rollback = !!(res && res.rollback);
+        return err;
+      },
+      /* 统一的失败收尾：把提示同时交给设置页与全局失败条，并记下安装脚本
+         有没有回滚包可退（没有就别说「已回滚」）。 */
+      failInstall: function (err) {
+        const code = (err && err.code) || "";
+        const text = code
+          ? this.t("settings.update.code." + code, { v: (err && err.arg) || "" })
+          : (err && err.message) || "";
+        this.updateError = this.t("settings.update.installFailed", { v: text });
+        this.updateFailText = this.updateError;
+        this.updateInstallDetail = "";
+        if (err && typeof err.rollback === "boolean") this.updateRollbackReady = err.rollback;
+      },
+      /* 服务端进度是瞬时快照，网速快时两次轮询之间能差几十个百分点。
+         显示值只增不减，避免进度条回头跳。 */
       applyUpdateTask: function (task) {
         if (!task) return;
         const prev = this.updateProgress || {};
         const nextPct = Number(task.percent) || 0;
+        const phase = task.phase || "downloading";
         this.updateProgress = {
-          // 服务端进度是瞬时快照，网速快时两次轮询之间能差几十个百分点。
-          // 显示值只增不减，避免进度条回头跳。
           percent: Math.max(Number(prev.percent) || 0, nextPct),
-          phase: task.phase || "downloading",
+          phase: phase,
           received: Number(task.received) || 0,
           total: Number(task.total) || 0,
         };
-        const pct = this.updateProgress.percent;
-        /* 阶段文案：下载 → 安装包就绪重启服务 → 服务重启等待上线。
-           进入安装/重启后总量不再有意义，把 total 清零让进度条切成不定式。 */
-        if (task.phase === "downloading") {
+        /* 阶段文案一律由前端按当前语言拼：服务端的 detail 只在失败时才有
+           意义（翻译好的原因），成功路径上是空串，直接回显会让英文界面
+           冒出中文。进入安装后总量不再有意义，把 total 清零让进度区切成
+           「准备中」，不假装还有百分比。 */
+        if (phase === "checking") {
+          this.updateInstallDetail = this.t("settings.update.checking");
+        } else if (phase === "downloading") {
           this.updateInstallDetail = this.t("settings.update.installingDownload");
-        } else if (task.phase === "verifying") {
-          this.updateInstallDetail = this.t("settings.update.verifying");
-        } else if (task.phase === "installing") {
+        } else if (phase === "installing") {
           this.updateInstallDetail = this.t("settings.update.installingReady");
           this.updateProgress = Object.assign({}, this.updateProgress, { total: 0 });
-        } else if (task.phase === "restarting") {
-          this.updateInstallDetail = this.t("settings.update.installingWait");
-          this.updateProgress = Object.assign({}, this.updateProgress, { total: 0 });
         }
+        if (phase === "downloading" || phase === "installing") this._updateSawActive = true;
       },
-      pollUpdateProgress: function (targetVersion) {
+      pollUpdateProgress: function (fromVersion) {
         const self = this;
         let misses = 0;
         const tick = async function () {
@@ -2298,22 +2359,48 @@
           try {
             const r = await window.EMU_API.updateProgress();
             misses = 0;
-            self.applyUpdateTask(r && r.task);
+            if (r && typeof r.attempt === "number") self.updateAttempt = r.attempt;
+            if (r && typeof r.rollback === "boolean") self.updateRollbackReady = r.rollback;
             const task = (r && r.task) || {};
-            if (task.phase === "error") {
+            if (task.phase === "failed") {
+              /* 服务端不会自己回到 idle，重试的头几百毫秒读到的还是上一次的
+                 失败状态。编号没变就说明这条死信不属于本轮，等新一轮开始。 */
+              if (typeof r.attempt === "number" && r.attempt <= self._updateIgnoreAttempt) {
+                self.installTimer = setTimeout(tick, 400);
+                return;
+              }
+              /* 下载/校验阶段的失败：此时安装脚本还没跑过，日志里留着的是
+                 上一次的记录，贴出来只会把人引到别的原因上，所以只报原因本身。 */
               self.updateInstalling = false;
-              self.updateError = self.t("settings.update.installFailed",
-                { v: task.error || "" });
+              self.failInstall({ code: task.code || "", message: task.detail || "" });
               return;
             }
-            // 新版本已上线：面板报告的版本号已经不再是安装前那个版本了。
-            // 用"和起始版本不同"判断，比依赖精确匹配目标版本号更耐得住
-            // Release 里 tag 带前缀、或资产名与版本号不完全一致的情况。
-            if (r && r.version && self._updateFromVersion &&
-                r.version !== self._updateFromVersion) {
+            /* 新版本已上线：面板报告的版本号不再等于安装前那个。
+               用「与起始版本不同」判断，比精确匹配目标版本号更耐得住
+               tag 带前缀、或资产名与版本号不完全一致的情况。 */
+            if (r && r.version && fromVersion && r.version !== fromVersion) {
               self.finishUpdate(r.version);
               return;
             }
+            /* 升级中途面板被换掉、新版本却没起来时，脚本会装回旧包再启动。
+               于是回到这里的是「同一个版本 + 全新的 idle 状态」，而内存里的
+               updateInstalling 还是 true —— 原先会一直轮询下去，弹窗永远
+               不消失。看到安装过程已经结束（idle）且版本没变就按失败处理，
+               并把脚本日志里的回滚记录留给卡片。 */
+            if (task.phase === "idle" && self._updateSawActive) {
+              const tail = (r && r.log) || "";
+              /* 只有脚本真的进了回滚分支才说「已回滚」；进程被别的原因重启、
+                 或装机超时，日志里没有这一行，就该提示去应用中心确认。 */
+              const rolled = /rolling back/.test(tail);
+              self.updateInstalling = false;
+              self.updateError = self.t("settings.update.installFailed", {
+                v: self.t(rolled ? "settings.update.rolledBack" : "settings.update.timeout"),
+              });
+              self.updateFailText = self.updateError;
+              self.updateInstallDetail = "";
+              return;
+            }
+            self.applyUpdateTask(task);
           } catch (e) {
             misses += 1;
             // 面板可能正在被替换，期间连不上是正常的；超时太久才报错
@@ -2321,21 +2408,24 @@
               self.updateInstalling = false;
               self.updateError = self.t("settings.update.installFailed",
                 { v: self.t("settings.update.timeout") });
+              self.updateFailText = self.updateError;
               return;
             }
           }
           // 400ms 轮询：更新包通常几 MB，在千兆内网不到 1 秒就下完，
           // 间隔太长只能抓到一两个中间值，看起来像"直接跳到完成"。
-          setTimeout(tick, 400);
+          self.installTimer = setTimeout(tick, 400);
         };
-        setTimeout(tick, 400);
+        this.installTimer = setTimeout(tick, 400);
       },
-      /* 新版本装好了：进度拉满、给个提示，然后整体重新加载页面。
+      /* 新版本装好了：给个提示，然后整体重新加载页面。
          面板在升级过程中被卸载重装，前端的内存状态（版本号、设置、路由）
-         都还是旧的，只刷新数据不够 —— 重载一次让页面跑在新版本上。 */
+         都还是旧的，只刷新数据不够 —— 重载一次让页面跑在新版本上。
+
+         这里的计数器是字节数，不是百分比：塞 100/100 会让界面显示成
+         「100 B / 100 B」。下载结束后真实总量本来就在，保持不动。 */
       finishUpdate: function (version) {
         const self = this;
-        this.updateProgress.percent = 100;
         this.updateInstallDetail = this.t("settings.update.done", { v: version || "" });
         this.ok("settings.update.done", { v: version || "" });
         setTimeout(function () {

@@ -204,7 +204,31 @@
 
     /* ---- update ---- */
     updateCheck: function (force) { return request(BASE + "/update/check" + (force ? "?force=1" : "")); },
-    installUpdate: function () { return request(BASE + "/update/install", { method: "POST", body: {} }); },
+    /* 把界面上已经查到的安装包信息一并带过去：后端据此免掉一次网络往返，
+       否则点下「一键更新」后还要空等一段看不到任何字节的检查。
+
+       只带资产的下载地址 —— info.url 是 Release 网页地址，不是安装包。 */
+    installUpdate: function (info) {
+      const body = {};
+      if (info) {
+        if (info.latest) body.version = info.latest;
+        const assets = (info.assets || []).filter(function (a) {
+          return String((a && a.name) || "").toLowerCase().endsWith(".fpk");
+        });
+        let picked = null;
+        for (const a of assets) {
+          if (String(a.name).indexOf("-all") >= 0) { picked = a; break; }
+        }
+        if (!picked) {
+          for (const a of assets) {
+            if (String(a.name).indexOf("-x86") >= 0) { picked = a; break; }
+          }
+        }
+        if (!picked && assets.length) picked = assets[0];
+        if (picked) { body.name = picked.name; body.url = picked.url; }
+      }
+      return request(BASE + "/update/install", { method: "POST", body: body });
+    },
     updateProgress: function () { return request(BASE + "/update/progress"); },
   };
 

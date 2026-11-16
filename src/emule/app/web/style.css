@@ -16,7 +16,6 @@
   --sidebar: #fafafa;
   --card: #ffffff;
   --muted: #f5f5f5;
-  --hover: #f5f5f5;
   --border: #e5e5e5;
   --border-soft: #efefef;
 
@@ -53,7 +52,6 @@
   --sidebar: #1c1c1c;
   --card: #1c1c1c;
   --muted: #262626;
-  --hover: #262626;
   --border: rgba(255, 255, 255, .10);
   --border-soft: rgba(255, 255, 255, .07);
 
@@ -225,12 +223,7 @@ svg { display: block; }
   background: var(--bg);
   position: sticky; top: 0; z-index: 20;
 }
-.topbar .grow { flex: 1; }
 .page-title { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
-.topbar-server {
-  /* hidden by default, the @media blocks below re-show it on small windows
-     so the same node is shared between desktop and phone topbars */
-}
 
 .content { padding: 16px 18px 40px; flex: 1; min-width: 0; }
 
@@ -615,6 +608,19 @@ input[type="number"] { -moz-appearance: textfield; }
 .upbanner-text span { font-size: 12px; color: var(--dim); }
 .upbanner-x { width: 28px; height: 28px; flex: 0 0 28px; }
 
+/* ---------------- update failed (every view) ---------------- */
+/* 与上面的新版本横幅同一套骨架，只换配色：红色传达「出事了」而不是「有新版」。 */
+.upfail {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 11px 14px; margin-bottom: var(--gap);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 9%, var(--card));
+  border-radius: var(--radius-lg);
+}
+.upfail-ic { flex: 0 0 20px; width: 20px; height: 20px; display: flex; align-items: center; color: var(--danger); }
+.upfail-ic svg { width: 18px; height: 18px; }
+.upfail-text { font-size: 13px; font-weight: 500; min-width: 0; overflow-wrap: anywhere; flex: 1 1 auto; }
+
 /* ---------------- version hero ---------------- */
 .vhero {
   display: flex; align-items: center; gap: 18px;
@@ -957,9 +963,8 @@ canvas { display: block; width: 100%; height: 100%; }
 .dirtytxt { font-size: 12.5px; color: var(--dim); }
 .dirtytxt.on { color: color-mix(in srgb, var(--warn) 72%, var(--text)); font-weight: 500; }
 
-/* small inline spinner for long running buttons */
+/* spinner used by the update overlay */
 @keyframes spin360 { to { transform: rotate(360deg); } }
-.spin { display: inline-flex; animation: spin360 1s linear infinite; }
 
 /* directories / channel rows reuse the chrow rhythm */
 .dirrow {
@@ -1001,10 +1006,6 @@ canvas { display: block; width: 100%; height: 100%; }
 }
 
 @media (max-width: 900px) {
-  /* Show the topbar server switcher (desktop hides it under .hide-sm below
-     this breakpoint, but the phone topbar is the only place the user can
-     pick a different server from since the sidebar is closed by default) */
-  .topbar-server { display: inline-flex !important; height: 32px; font-size: 13px; max-width: 170px; }
   /* Above .mask (60) - otherwise the scrim sits on top of the drawer, dimming
      it and swallowing every click on the nav items and footer buttons. */
   .side { position: fixed; z-index: 65; left: 0; top: 0; height: 100%;
@@ -1049,7 +1050,6 @@ canvas { display: block; width: 100%; height: 100%; }
   .tbar-tasks .tfilterseg { order: 3; flex: 1 1 auto; min-width: 0; }
   .tbar-tasks .tsort { order: 4; flex: 0 0 auto; gap: 6px; }
   .tbar-tasks .tsort-pick { flex: 0 0 auto; width: 96px; min-width: 96px; padding-right: 22px; }
-  .topbar-server { max-width: 110px; height: 30px; font-size: 12px; padding: 0 8px; }
   /* Phone reads as an app, not a doc: anchor modals at upper-mid so the cancel
      / confirm buttons fall under the user's thumb and don't have to be reached
      from the very bottom of the screen. The scale-up animation makes content-
@@ -1098,6 +1098,13 @@ canvas { display: block; width: 100%; height: 100%; }
   .upbanner-text b { font-size: 13px; }
   .upbanner .btn.primary { order: 3; flex: 1 1 auto; }
   .upbanner-x { order: 4; }
+  /* 失败提示同样按行拆开：图标 + 文字一行，按钮沉到下一行拉满 */
+  .upfail { gap: 8px; padding: 10px 12px; }
+  .upfail .spacer { display: none; }
+  .upfail-ic { order: 1; }
+  .upfail-text { order: 2; flex: 1 1 calc(100% - 32px); font-size: 12.5px; }
+  .upfail .btn { order: 3; flex: 1 1 auto; }
+  .upfail .upbanner-x { order: 4; flex: 0 0 28px; }
   .vhero { padding: 14px 10px; gap: 10px; }
   .vv { font-size: 21px; }
   /* 图标与两行文字同一行（文字吃掉剩余宽度），按钮单独占下一整行。

@@ -12,6 +12,7 @@
 调用方拿 str(exc) 就能直接给用户看中文原因。
 """
 import gzip
+import http.client
 import json
 import os
 import socket
@@ -43,7 +44,55 @@ def user_agent():
 
 
 class FetchError(Exception):
-    """抓取失败。消息已经是中文，可直接回给前端。"""
+    """抓取失败。
+
+    消息是中文，用作拿不到 code 时的回退文本；code 是语言中立的失败标识，
+    界面优先用它翻译 —— 后端只塞中文句子的话，英文界面会冒出中文。
+    """
+
+    def __init__(self, message="", code=""):
+        Exception.__init__(self, message)
+        self.code = str(code or "")
+
+
+#: 网络层失败 → 用户能照着做点什么的那个原因。
+#: 顺序有意义：socket.gaierror 是 OSError 的子类，通用判断必须排在最后。
+def error_code(exc, seen=None):
+    """把一个异常翻译成界面能翻译的码；认不出来返回空串。
+
+    urllib 会把真实原因包在 URLError.reason 里（有时还套两层），所以这里递归
+    拆壳 —— 不拆的话「DNS 解析失败」在界面上永远显示成一句泛泛的网络错误。
+    """
+    if isinstance(exc, FetchError):
+        return exc.code
+    if seen is None:
+        seen = set()
+    if id(exc) in seen:
+        return ""
+    seen.add(id(exc))
+    if isinstance(exc, urllib.error.HTTPError):
+        code = int(getattr(exc, "code", 0) or 0)
+        if code in (403, 429):
+            return "gh403"
+        if code == 404:
+            return "gh404"
+        return ""
+    if isinstance(exc, urllib.error.URLError):
+        inner = getattr(exc, "reason", None)
+        return error_code(inner, seen) if inner is not None else ""
+    if isinstance(exc, ssl.SSLError):
+        return "netTls"
+    if isinstance(exc, socket.gaierror):
+        return "netDns"
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "netTimeout"
+    if isinstance(exc, ConnectionRefusedError):
+        return "netRefused"
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return "netReset"
+    if isinstance(exc, http.client.IncompleteRead):
+        return "netReset"
+    return ""
 
 
 def describe_error(exc):
@@ -75,7 +124,33 @@ def describe_error(exc):
         return "请求超时"
     if isinstance(exc, ssl.SSLError):
         return "HTTPS 证书校验失败：%s" % (exc,)
+    if isinstance(exc, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+        return "连接被中断，请重试"
+    if isinstance(exc, http.client.RemoteDisconnected):
+        return "连接被中断，请重试"
+    if isinstance(exc, http.client.IncompleteRead):
+        return "连接被中断，请重试"
     return str(exc) or exc.__class__.__name__
+
+
+def fetch_error(exc):
+    """同一个失败同时给出中文原因和语言中立码，两件事一次算完。
+
+    分成两处各自判断会出现「码说 DNS、文字说超时」这种自相矛盾。
+    """
+    if isinstance(exc, FetchError):
+        return exc
+    return FetchError(describe_error(exc), error_code(exc))
+
+
+def _http_status_error(status):
+    """HTTP 状态码 → 带码的 FetchError（403/429 是限流，404 是资源不存在）。"""
+    status = int(status or 0)
+    if status in (403, 429):
+        return FetchError("HTTP %d（接口被限流或拒绝访问）" % status, "gh403")
+    if status == 404:
+        return FetchError("HTTP 404（资源不存在）", "gh404")
+    return FetchError("HTTP %d（服务器返回错误）" % status)
 
 
 def _insecure_tls():
@@ -188,17 +263,19 @@ def _pinned_request(url, method="GET", headers=None, data=None, timeout=DEFAULT_
         try:
             infos = socket.getaddrinfo(target_host, port, family=0, type=socket.SOCK_STREAM)
         except OSError as exc2:
-            raise FetchError("解析 %s (IPv%d) 失败：%s" % (target_host, family, exc2))
+            raise FetchError("解析 %s (IPv%d) 失败：%s" % (target_host, family, exc2),
+                             "netDns")
         for info in infos:
             if info[0] == want:
                 addr = info[4][0]
                 break
     if not addr:
-        raise FetchError("解析 %s (IPv%d) 没有可用地址（设备或网络可能没有 IPv6）" % (target_host, family))
+        raise FetchError("解析 %s (IPv%d) 没有可用地址（设备或网络可能没有 IPv6）"
+                         % (target_host, family), "netDns")
     try:
         sock = socket.create_connection((addr, port), timeout=timeout)
     except OSError as exc:
-        raise FetchError("连接 %s:%d 失败：%s" % (addr, port, exc))
+        raise FetchError("连接 %s:%d 失败：%s" % (addr, port, exc), error_code(exc))
     try:
         if parts.scheme == "https":
             context = _ssl_context(insecure)
@@ -207,7 +284,7 @@ def _pinned_request(url, method="GET", headers=None, data=None, timeout=DEFAULT_
             try:
                 sock = context.wrap_socket(sock, server_hostname=target_host)
             except ssl.SSLError as exc:
-                raise FetchError("HTTPS 握手失败：%s" % (exc,))
+                raise FetchError("HTTPS 握手失败：%s" % (exc,), "netTls")
         method_u = (method or ("POST" if data else "GET")).upper()
         path = parts.path or "/"
         if parts.query:
@@ -223,13 +300,13 @@ def _pinned_request(url, method="GET", headers=None, data=None, timeout=DEFAULT_
         try:
             sock.sendall(blob)
         except OSError as exc:
-            raise FetchError("发送请求失败：%s" % (exc,))
+            raise FetchError("发送请求失败：%s" % (exc,), error_code(exc))
         chunks = []
         while True:
             try:
                 piece = sock.recv(65536)
             except socket.timeout:
-                raise FetchError("请求超时")
+                raise FetchError("请求超时", "netTimeout")
             if not piece:
                 break
             chunks.append(piece)
@@ -248,7 +325,7 @@ def _pinned_request(url, method="GET", headers=None, data=None, timeout=DEFAULT_
     except (IndexError, ValueError):
         status = 0
     if status >= 400:
-        raise FetchError("HTTP %d（服务器返回错误）" % status)
+        raise _http_status_error(status)
     charset = "utf-8"
     for line in head_part.split(b"\r\n"):
         if line.lower().startswith(b"content-type:"):
@@ -276,13 +353,13 @@ def open_url(url, timeout=DEFAULT_TIMEOUT, headers=None, data=None, method=None,
             raw = resp.read(MAX_TEXT_BYTES + 1)
             return getattr(resp, "status", 200), _decode(resp, raw, MAX_TEXT_BYTES)
     except urllib.error.HTTPError as exc:
-        raise FetchError(describe_error(exc))
+        raise fetch_error(exc)
     except urllib.error.URLError as exc:
-        raise FetchError(describe_error(exc))
+        raise fetch_error(exc)
     except socket.timeout:
-        raise FetchError("请求超时")
+        raise FetchError("请求超时", "netTimeout")
     except (ssl.SSLError, ValueError) as exc:
-        raise FetchError(describe_error(exc))
+        raise fetch_error(exc)
 
 
 def get_text(url, timeout=DEFAULT_TIMEOUT, headers=None, retries=DEFAULT_RETRIES,
@@ -303,7 +380,7 @@ def get_text(url, timeout=DEFAULT_TIMEOUT, headers=None, retries=DEFAULT_RETRIES
             else:
                 status, text = open_url(url, timeout=timeout, headers=extra, insecure=insecure)
             if status and status >= 400:
-                raise FetchError("HTTP %d（服务器返回错误）" % status)
+                raise _http_status_error(status)
             return text
         except FetchError as exc:
             last = exc
@@ -321,7 +398,7 @@ def get_json(url, timeout=DEFAULT_TIMEOUT, headers=None, retries=DEFAULT_RETRIES
     try:
         return json.loads(text)
     except ValueError as exc:
-        raise FetchError("返回内容不是合法 JSON：%s" % (exc,))
+        raise FetchError("返回内容不是合法 JSON：%s" % (exc,), "checkFailed")
 
 
 def fetch_bytes(url, timeout=DEFAULT_TIMEOUT + 12, headers=None, retries=DEFAULT_RETRIES,
@@ -341,16 +418,17 @@ def fetch_bytes(url, timeout=DEFAULT_TIMEOUT + 12, headers=None, retries=DEFAULT
                         break
                     blob.extend(chunk)
                     if len(blob) > limit:
-                        raise FetchError("文件超过 %d MB，已中止" % (limit // 1024 // 1024))
+                        raise FetchError("文件超过 %d MB，已中止" % (limit // 1024 // 1024),
+                                         "pkgTooBig")
                 return bytes(blob)
         except urllib.error.HTTPError as exc:
-            raise FetchError(describe_error(exc))
+            raise fetch_error(exc)
         except urllib.error.URLError as exc:
-            last = FetchError(describe_error(exc))
+            last = fetch_error(exc)
         except socket.timeout:
-            last = FetchError("请求超时")
+            last = FetchError("请求超时", "netTimeout")
         except OSError as exc:
-            last = FetchError("读取失败：%s" % (exc,))
+            last = FetchError("读取失败：%s" % (exc,), error_code(exc))
         if attempt < int(retries):
             time.sleep(0.5 * (attempt + 1))
     raise last or FetchError("下载失败")
@@ -370,7 +448,7 @@ def download(url, dest, timeout=DEFAULT_TIMEOUT + 22, retries=DEFAULT_RETRIES,
     try:
         os.makedirs(parent, exist_ok=True)
     except OSError as exc:
-        raise FetchError("无法创建下载目录：%s" % (exc,))
+        raise FetchError("无法创建下载目录：%s" % (exc,), "noDir")
     tmp = dest + ".part"
     last = None
     for attempt in range(max(0, int(retries)) + 1):
@@ -391,23 +469,40 @@ def download(url, dest, timeout=DEFAULT_TIMEOUT + 22, retries=DEFAULT_RETRIES,
                             break
                         received += len(chunk)
                         if received > limit:
-                            raise FetchError("文件超过 %d MB，已中止" % (limit // 1024 // 1024))
+                            raise FetchError("文件超过 %d MB，已中止" % (limit // 1024 // 1024),
+                                             "pkgTooBig")
                         handle.write(chunk)
                         if progress:
                             try:
                                 progress(received, total)
                             except Exception:
                                 pass
+                # 服务器给了长度就必须收满。连接中途断掉时 read() 只是返回空，
+                # 循环正常退出，半截文件于是被原子改名成"完整"的包 —— 后面
+                # 只能靠解压失败才暴露，用户看到的原因也成了"包坏了"而不是
+                # "网络断了"。这里先对账，字节不够就当场报网络错误。
+                if total and received != total:
+                    raise FetchError("下载不完整：收到 %d 字节，应为 %d"
+                                     % (received, total), "netReset")
             os.replace(tmp, dest)
             return {"path": dest, "size": os.path.getsize(dest), "url": url}
         except urllib.error.HTTPError as exc:
-            last = FetchError(describe_error(exc))
+            last = fetch_error(exc)
         except urllib.error.URLError as exc:
-            last = FetchError(describe_error(exc))
+            last = fetch_error(exc)
         except socket.timeout:
-            last = FetchError("下载超时")
-        except (OSError, FetchError) as exc:
-            last = exc if isinstance(exc, FetchError) else FetchError("写入文件失败：%s" % (exc,))
+            last = FetchError("下载超时", "netTimeout")
+        except FetchError as exc:
+            last = exc
+        except OSError as exc:
+            # 这里的 OSError 有两个来源，不能一律说成「写入文件失败」：
+            # 对端断开连接（RemoteDisconnected / ConnectionReset）也是 OSError，
+            # 把它说成磁盘问题会把用户引到完全错误的方向。
+            code = error_code(exc)
+            if code in ("netReset", "netRefused", "netTimeout", "netDns", "netTls"):
+                last = FetchError(describe_error(exc), code)
+            else:
+                last = FetchError("写入文件失败：%s" % (exc,), code)
         try:
             os.remove(tmp)
         except OSError:

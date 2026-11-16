@@ -55,6 +55,14 @@ ADDED_RECORDS_MAX = 5000
 #: 每升级一次就多一个约 9 MB 的 fpk，实测生产机三天堆到 135 MB / 16 个，
 #: 而装完之后这些包再无用处 —— 只留最近几个够回滚就够了。
 UPDATES_KEEP = 2
+#: 升级脚本的回滚底牌。它不占上面那个「保留 N 个」的名额，也永不删除：
+#: 把它算进 keep 会让人以为留了 2 个真包，实际只剩 1 个。
+ROLLBACK_FPK = "rollback.fpk"
+
+
+def is_rollback_name(name):
+    """文件名是不是那份回滚包。清理逻辑靠它单独豁免。"""
+    return str(name or "") == ROLLBACK_FPK
 
 VERSION_FALLBACK = "26.11.0"
 
@@ -492,7 +500,11 @@ class Store(object):
                 "var_dir": self.var_dir}
 
     def updates_list(self):
-        """updates/ 下的安装包清单，新的在前。含半截的 .part。"""
+        """updates/ 下的安装包清单，新的在前。含半截的 .part。
+
+        rollback.fpk 是升级脚本的回滚底牌，单独标记出来交给界面显示 ——
+        把它当成一个普通包会让人以为「保留 2 个」实际只留了 1 个真包。
+        """
         out = []
         try:
             names = os.listdir(self.update_dir)
@@ -536,11 +548,16 @@ class Store(object):
         freed = 0
         root = os.path.realpath(self.update_dir)
         items = self.updates_list()
-        full = [item for item in items if not item["partial"]]
+        # 回滚包不参与计数：它既不是「历史安装包」，也不该占保留名额。
+        full = [item for item in items
+                if not item["partial"] and not is_rollback_name(item["name"])]
         # 新的在前，前 keep 个保留
         keep_names = set(item["name"] for item in full[:keep])
         for item in items:
             name = item["name"]
+            if is_rollback_name(name):
+                kept.append(name)
+                continue
             in_use = bool(protect) and protect in name
             if in_use:
                 kept.append(name)

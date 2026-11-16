@@ -23,7 +23,7 @@ UI 文案：中文为主，英文完整对照（i18n），品牌名一律 `eMule
 
 ## 2. 目录结构
 
-仓库（D:\Workspace\DeepSeek Harness\fn-emule）：
+仓库（D:\Workspace\DSH\fn-emule）：
 
 ```
 fn-emule/

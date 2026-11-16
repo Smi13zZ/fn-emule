@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>eMule</title>
 <link rel="icon" href="./images/icon.svg">
-<link rel="stylesheet" href="./style.css?v=26.11.52">
+<link rel="stylesheet" href="./style.css?v=26.11.53">
 </head>
 <body>
 <div id="app" v-cloak>
@@ -94,6 +94,21 @@
         <button class="btn sm primary" type="button" @click="askInstallUpdate">{{ t('settings.update.install') }}</button>
         <button class="icon-btn ghost upbanner-x" type="button" :title="t('settings.update.dismiss')"
                 :aria-label="t('settings.update.dismiss')" @click="dismissUpdateBanner">
+          <span v-html="ic('close')"></span>
+        </button>
+      </div>
+
+      <!-- ---------- update failed: shows on every view ----------
+           从概览页顶部横幅点「一键更新」失败时，用户并不在设置页，而失败提示
+           原先只渲染在设置-更新的卡片里 —— 结果界面上一个字都没有，看起来像
+           什么都没发生。这条独立于设置页，带「查看详情」直接跳过去，也可单独关。 -->
+      <div class="upfail" v-if="updateFailText">
+        <span class="upfail-ic" v-html="ic('close')"></span>
+        <div class="upfail-text">{{ updateFailText }}</div>
+        <div class="spacer"></div>
+        <button class="btn sm" type="button" @click="openUpdateSection">{{ t('settings.update.bannerDetail') }}</button>
+        <button class="icon-btn ghost upbanner-x" type="button" :title="t('settings.update.dismissFail')"
+                :aria-label="t('settings.update.dismissFail')" @click="dismissUpdateFail">
           <span v-html="ic('close')"></span>
         </button>
       </div>
@@ -1580,7 +1595,9 @@
             <dt>{{ t('settings.update.publishedAt') }}</dt>
             <dd>{{ updateInfo && updateInfo.published_at ? updateInfo.published_at.slice(0, 10) : '—' }}</dd>
           </dl>
-          <div class="hint" style="margin-top:12px">{{ t('settings.update.hint') }}</div>
+          <!-- 没有回滚包时不能继续承诺「失败会自动回滚」：那种情况只能去
+               应用中心手动处理，说清楚比含糊更省事。 -->
+          <div class="hint" style="margin-top:12px">{{ t(updateRollbackReady ? 'settings.update.hint' : 'settings.update.hintNoRollback') }}</div>
           <div class="hint" style="margin-top:6px">{{ t('settings.update.autoCheck') }}</div>
         </div>
 
@@ -1942,10 +1959,10 @@
 </div>
 
 <script src="./lib/vue.global.prod.js"></script>
-<script src="./js/i18n.js?v=26.11.52"></script>
-<script src="./js/util.js?v=26.11.52"></script>
-<script src="./js/api.js?v=26.11.52"></script>
-<script src="./js/charts.js?v=26.11.52"></script>
-<script src="./js/app.js?v=26.11.52"></script>
+<script src="./js/i18n.js?v=26.11.53"></script>
+<script src="./js/util.js?v=26.11.53"></script>
+<script src="./js/api.js?v=26.11.53"></script>
+<script src="./js/charts.js?v=26.11.53"></script>
+<script src="./js/app.js?v=26.11.53"></script>
 </body>
 </html>
