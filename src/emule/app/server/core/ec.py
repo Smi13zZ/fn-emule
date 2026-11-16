@@ -42,6 +42,34 @@ DEFAULT_TIMEOUT = 10.0
 LONG_TIMEOUT = 12.0
 DEFAULT_CLIENT_NAME = "fn-emule-panel"
 
+
+def _panel_version():
+    """面板版本号，用于 EC 握手时自报的客户端版本。
+
+    优先取 EMULE_VERSION（cmd/main 从 manifest 读出后注入的环境变量）；
+    取不到就退回读同级的 manifest，最后才用一个不会误导人的占位值。
+    不要在调用点硬编码版本号 —— 那样每次发版都得记着改，忘了就会在
+    aMule 日志里一直显示旧版本。
+    """
+    import os
+    ver = (os.environ.get("EMULE_VERSION") or "").strip()
+    if ver:
+        return ver
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        # core/ -> server/ -> app/ -> manifest
+        for up in ("..", os.path.join("..", ".."), os.path.join("..", "..", "..")):
+            path = os.path.normpath(os.path.join(here, up, "manifest"))
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8") as f:
+                    for line in f:
+                        s = line.strip()
+                        if s.startswith("version") and "=" in s:
+                            return s.split("=", 1)[1].strip()
+    except Exception:  # noqa: BLE001 - 取版本失败不能影响建连
+        pass
+    return "unknown"
+
 #: 增量更新缓存里一条客户端/服务器多久没被任何一次回包提到就丢弃（秒）。
 #: aMule 只在「这一轮有变化」时才把条目放进回包，所以没出现不等于消失。
 #: 取 900 秒：排队中的来源可能十几分钟都没有状态变化（一直等位），
@@ -1231,13 +1259,15 @@ class ECClient(object):
     """一条 EC 连接。线程安全：所有请求经内部锁串行执行。"""
 
     def __init__(self, host="127.0.0.1", port=4712, password="", timeout=DEFAULT_TIMEOUT,
-                 client_name=DEFAULT_CLIENT_NAME, client_version="26.11.0"):
+                 client_name=DEFAULT_CLIENT_NAME, client_version=None):
         self.host = host
         self.port = int(port)
         self.password = password or ""
         self.timeout = float(timeout)
         self.client_name = client_name
-        self.client_version = client_version
+        # 版本号不再硬编码：取面板实际版本（EMULE_VERSION，由 cmd/main 从 manifest 读出）。
+        # 写死成某个旧号会让 aMule 日志里一直显示过时的客户端版本，排查时误导人。
+        self.client_version = client_version or _panel_version()
         self.server_version = ""
         self.protocol_version = 0
         #: 收到“异步推送包”时的回调（例如搜索会话累积结果）
@@ -1499,8 +1529,11 @@ class ECClient(object):
         """EC_OP_STAT_REQ：一次拿到速度/计数/连接状态/日志行。"""
         return stats_record(self.request(Op.STAT_REQ, timeout=timeout))
 
-    def download_queue(self):
-        packet = self.request(Op.GET_DLOAD_QUEUE, detail=Detail.FULL)
+    def download_queue(self, timeout=None):
+        """下载队列。timeout 可覆盖默认值：在「加入后确认是否真的入队」这类
+        紧凑预算的热路径上，必须传一个小的值，否则单次超时就能吃掉整个请求预算。
+        """
+        packet = self.request(Op.GET_DLOAD_QUEUE, detail=Detail.FULL, timeout=timeout)
         return [partfile_record(tag) for tag in packet.all(Tag.PARTFILE)]
 
     def upload_queue(self):

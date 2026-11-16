@@ -25,11 +25,11 @@
     ]
   },
   {
-    "stepTitle": "电驴网络端口",
+    "stepTitle": "eD2k 网络端口",
     "items": [
       {
         "type": "tips",
-        "helpText": "eD2k 的 TCP 与 UDP 端口，用于和电驴网络里的其他客户端直连。路由器上把这两个端口转发到本机可以获得 High ID，明显提升下载速度；不改也能用（Low ID）。"
+        "helpText": "eD2k 的 TCP 与 UDP 端口，用于和 eD2k 网络里的其他客户端直连。路由器上把这两个端口转发到本机可以获得 High ID，明显提升下载速度；不改也能用（Low ID）。"
       },
       {
         "type": "text",

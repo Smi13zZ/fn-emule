@@ -2704,6 +2704,10 @@ class Handler(BaseHTTPRequestHandler):
                 "stopped": bool(data.get("stopped")),
                 "results": as_list(data.get("results")),
                 "started_at": int_or(data.get("started_at")),
+                # 后端算好的提示与统计必须放行：这里是白名单式的字段挑选，
+                # 少写一个字段前端就永远收不到。
+                "warn": str(data.get("warn") or ""),
+                "counts": as_dict(data.get("counts")),
             })
             return
 

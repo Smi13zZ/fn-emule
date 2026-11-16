@@ -159,11 +159,15 @@
         savingServer: false,
 
         query: "",
-        searchKind: "server",
+        // 默认「全局」（服务器 + Kad）。服务器不回应时后端会自动补搜一次 Kad，
+        // 结果照样显示，只是上面多一条说明。
+        searchKind: "global",
         searchKinds: ["server", "kad", "global"],
         searchMethod: "name",
         searchMethods: ["name", "hash"],
         searchId: "",
+        searchWarn: "",
+        searchCounts: { total: 0, local: 0, queued: 0 },
         searchRunning: false,
         searchProgress: 0,
         searchResults: [],
@@ -366,14 +370,23 @@
       tasks: function () {
         return this.transfersData.items || [];
       },
-      taskCount: function () { return this.tasks.length; },
+      // 分开算：downCount = 我加过的下载任务（不含上传），upCount = 当前上传中的 peer 数
+      downCount: function () {
+        return this.tasks.filter(function (x) { return x.kind !== "upload"; }).length;
+      },
+      upCount: function () {
+        return this.tasks.filter(function (x) { return x.kind === "upload"; }).length;
+      },
       visibleTasks: function () {
         const self = this;
         const q = this.search.trim().toLowerCase();
         let list = this.tasks.filter(function (it) {
           if (q && (it.name || "").toLowerCase().indexOf(q) < 0 &&
               (it.category || "").toLowerCase().indexOf(q) < 0) return false;
-          if (self.filter === "all") return true;
+          // 「全部」= 我添加过的所有下载任务（下载中/等待/暂停/完成/出错），
+          // 不含上传：上传列表里一条 = 一个正在从我这拿数据的 peer 会话，
+          // 不是任务，混进来只会让列表看着一堆莫名其妙的空档。
+          if (self.filter === "all") return it.kind !== "upload";
           return FMT.stateInfo(it.status).group === self.filter;
         });
         const key = this.sortKey;
@@ -432,7 +445,8 @@
           .map(function (b) { return { key: b.key, label: b.label, value: b.n, color: b.color }; });
       },
       recentLogs: function () {
-        return this.logs.slice(-6);
+        // logs 已是「最新在上」顺序，最近 6 条就是头 6 条
+        return this.logs.slice(0, 6);
       },
       visibleLogs: function () {
         const self = this;
@@ -880,6 +894,16 @@
       go: function (id) {
         this.view = id;
         this.navOpen = false;
+        // 离开搜索页就停掉结果核对轮询：它每轮都要按结果条数去共享列表
+        // 核对磁盘，留在后台空转只会白白打引擎。回到搜索页时若搜索已结束
+        // 且有结果，重新拉一次即可（数据本身没变，只是状态核对）。
+        if (id !== "search" && !this.searchRunning && this.searchTimer) {
+          clearInterval(this.searchTimer);
+          this.searchTimer = null;
+        }
+        if (id === "search" && !this.searchRunning && !this.searchTimer && this.searchResults.length) {
+          this.searchTimer = setInterval(this.pollSearch, 8000);
+        }
         if (id === "logs") { this.logCleared = false; this.loadLogs(); }
         if (id === "diagnostics") this.loadDiagnostics();
         if (id === "settings") { this.loadNotify(); }
@@ -1012,6 +1036,9 @@
         try {
           const r = await window.EMU_API.transferDelete(hashes, !!withData);
           const n = (r && r.count) || hashes.length;
+          // 删完立刻把搜索结果对一遍：删的那个文件马上变回「下载」，
+          // 不用切页、不用重搜、不用刷新。
+          this.refreshSearchQuiet();
           // When the data is kept the backend reports the folder it moved the
           // .part files into; one hint is enough, no per-row listing.
           const kept = (r && r.results || []).filter(function (x) { return x && x.kept; })[0];
@@ -1180,6 +1207,8 @@
         this.searchRunning = true;
         this.searchStarted = true;
         this.searchProgress = 0;
+        this.searchWarn = "";
+        this.searchCounts = { total: 0, local: 0, queued: 0 };
         this.searchResults = [];
         this.resultSelection = [];
         try {
@@ -1197,6 +1226,10 @@
         try {
           const d = await window.EMU_API.searchState(this.searchId);
           this.searchProgress = Math.max(0, Math.min(100, Number(d && d.progress) || 0));
+          // 后端会带 warn（server_no_response / search_stalled_no_result）。
+          // 必须让用户看见，否则「搜不到」会被当成软件坏了。
+          this.searchWarn = d && d.warn ? String(d.warn) : "";
+          this.searchCounts = (d && d.counts) || { total: 0, local: 0, queued: 0 };
           const prev = {};
           this.searchResults.forEach(function (r) { prev[r.hash] = r; });
           this.searchResults = ((d && d.results) || []).map(function (r) {
@@ -1206,8 +1239,18 @@
           if (d && d.done) {
             this.searchProgress = 100;
             this.searchRunning = false;
-            clearInterval(this.searchTimer);
-            this.searchTimer = null;
+            // 搜索结束≠结果冻结：用户可能去任务页把某个文件删了再回来。
+            // 所以不停止轮询，改成低频继续核对 —— 删掉之后这里会自动
+            // 变回「下载」，不用重新搜索，也不用刷新页面。
+            // 但只在「搜索页正开着、且确实有结果」时才继续：每条结果都要跟
+            // 共享列表核对一次，空页面或切走之后继续打引擎纯属浪费。
+            if (this.searchTimer) {
+              clearInterval(this.searchTimer);
+              this.searchTimer = null;
+              if (this.searchResults.length) {
+                this.searchTimer = setInterval(this.pollSearch, 8000);
+              }
+            }
           }
         } catch (e) {
           this.searchRunning = false;
@@ -1230,6 +1273,73 @@
       toggleAllResults: function () {
         if (this.allResultsSelected) this.resultSelection = [];
         else this.resultSelection = this.searchResults.filter((r) => !r.already).map((r) => r.hash);
+      },
+      // 复制本地文件路径。页面是 http 访问的（不是 https），navigator.clipboard
+      // 在非安全上下文里不可用，所以必须带一个临时输入框的兜底写法。
+      // 极端兜底：所有复制方式都失败时，才弹框让用户自己按 Ctrl+C
+      manualCopy: function (text) {
+        try {
+          const r = window.prompt(this.t("search.copyPathManual"), text);
+          // prompt 在部分内嵌 WebView / 无头环境下直接返回 null 且不抛异常，
+          // 用户会以为已经复制了。这时退回 toast，把路径本身显示出来。
+          if (r === null || r === undefined) this.toast(text, "warn");
+        } catch (e) {
+          this.toast(text, "warn");
+        }
+      },
+      copyLocalPath: function (r) {
+        const text = (r && (r.local_path || r.name)) || "";
+        if (!text) { this.toast(this.t("search.copyEmpty"), "warn"); return; }
+        const done = () => this.ok("search.pathCopied");
+        // 局域网 http 页面属于「非安全上下文」：navigator.clipboard 是 undefined。
+        // 但旧的 execCommand("copy") 在这种页面里仍然有效 —— 前提是它必须在
+        // 用户点击的回调里**同步**执行。
+        const legacy = () => {
+          let ta = null;
+          try {
+            ta = document.createElement("textarea");
+            ta.value = text;
+            ta.setAttribute("readonly", "");
+            ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            ta.setSelectionRange(0, text.length);
+            const okCopy = document.execCommand("copy");
+            if (okCopy) done();
+            else this.manualCopy(text);
+          } catch (e) {
+            this.manualCopy(text);
+          } finally {
+            if (ta && ta.parentNode) ta.parentNode.removeChild(ta);
+          }
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(text).then(done).catch(legacy);
+        } else {
+          legacy();
+        }
+      },
+      // 静默重取一次搜索结果（只更新状态，不弹提示、不动进度条）
+      refreshSearchQuiet: async function () {
+        if (!this.searchId || !this.searchResults.length) return;
+        try {
+          const d = await window.EMU_API.searchState(this.searchId);
+          if (!d || !d.results) return;
+          const prev = {};
+          this.searchResults.forEach(function (x) { prev[x.hash] = x; });
+          this.searchResults = d.results.map(function (x) {
+            const old = prev[x.hash];
+            return Object.assign({}, x, { adding: old ? !!old.adding : false });
+          });
+          this.searchCounts = d.counts || this.searchCounts;
+          if (d.warn !== undefined) this.searchWarn = d.warn ? String(d.warn) : "";
+        } catch (e) {
+          // 静默失败：不能因为刷新状态出错就去打扰用户。
+          // 但会话过期（后端返回「搜索会话不存在」）时旧告警会一直挂在页面上，
+          // 那是一条已经失效的提示，跟着结果一起清掉更诚实。
+          this.searchWarn = "";
+        }
       },
       downloadResult: async function (r) {
         if (r.already || r.adding) return;
@@ -1290,6 +1400,13 @@
           await this.loadShared(true);
           this.startSharedScanWatch();
         } catch (e) {
+          // 失败必须留痕：以前这里只弹一个转瞬即逝的提示，用户以为「点了没反应」
+          this.sharedProgress = {
+            running: false,
+            error: String((e && (e.message || e.detail)) || e || "重新载入失败"),
+            scan_dirs: 0,
+            shared_dirs: 0,
+          };
           this.fail("err.opFailed", e);
         } finally {
           this.sharedReloading = false;
@@ -1481,7 +1598,9 @@
               source: l.source || "engine",
             };
           });
-          if (this.logAuto) this.$nextTick(this.jumpToLogEnd);
+          // 日志一律「最新在上」：后端按时间正序给，这里翻一下，
+          // 打开就能看到刚发生的事，不用滚到最底下。
+          this.logs = this.logs.slice().reverse();
         } catch (e) {
           if (!silent) this.logs = [];
         } finally {
@@ -1512,9 +1631,16 @@
           },
         };
       },
+      /* 「回到最新」按钮：无条件滚到顶。日志是最新在上，顶部就是最新。 */
+      scrollLogTop: function () {
+        const box = this.$refs.logBox;
+        if (box) box.scrollTop = 0;
+      },
+      /* 自动刷新用：只在用户还停在顶部时才保持顶部，往下翻了他自己看，
+         不硬把他拽回去。 */
       jumpToLogEnd: function () {
         const box = this.$refs.logBox;
-        if (box) box.scrollTop = box.scrollHeight;
+        if (box && box.scrollTop <= 24) box.scrollTop = 0;
       },
 
       /* ---------------- settings ---------------- */

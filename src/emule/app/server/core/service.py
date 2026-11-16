@@ -660,6 +660,8 @@ class EmuleService(object):
         self._shared_refreshing = False
         # 共享扫描进度：{running, started_at, baseline, current, roots, scan_dirs, ...}
         self._shared_scan = None
+        # 共享目录磁盘存在性核对缓存：{at, paths}，见 _prune_missing_shared
+        self._shared_exists_cache = None
 
     # ------------------------------------------------------------ 设置
     def _settings(self):
@@ -1776,6 +1778,23 @@ class EmuleService(object):
     SHARED_PROGRESS_INTERVAL = 5.0
     #: 连续这么多轮（× PROGRESS_INTERVAL）条数没变化就认为扫描结束
     SHARED_SCAN_IDLE_ROUNDS = 12
+    #: 连续这么多轮都拿不到引擎数据（引擎忙/离线）才放弃跟踪扫描进度。
+    #: 超时不能被当成「无进展」，否则引擎一忙就会把还在跑的扫描判死。
+    SHARED_SCAN_TIMEOUT_ROUNDS = 60
+
+    #: 进度卡在 99 不动超过这么多轮就收尾（约 10 秒）。
+    #: 「全局」本来就含 Kad，Kad 的结果通常先到，进度最后才走完 100；
+    #: 服务器那半边彻底不回应时进度会永远停在 99 —— 这时把已搜到的列出来并标注即可。
+    SEARCH_STUCK99_ROUNDS = 8
+
+    #: 通用停滞判定：连续这么多轮「结果条数」完全没增加就收尾。
+    #: 这个判据比猜 progress 数值靠谱 —— server 是 0xFFFF、global 是 1..100、kad 是 0，
+    #: 语义各不相同，但「有没有新结果进来」对用户是唯一有感的东西。
+    SEARCH_IDLE_ROUNDS = 10
+
+    #: 加入下载后确认「真的进了队列」的总预算（秒）。
+    #: 面板 /api 预算是 15 秒，这里留足余量，别把请求拖成超时。
+    SEARCH_ACCEPT_BUDGET = 3.0
 
     def _shared_cache_get(self):
         """取缓存的 payload（**不是** {at, payload} 整个条目）。
@@ -1899,12 +1918,18 @@ class EmuleService(object):
                 "ed2k_link": record.get("ed2k_link") or "",
             })
         items.sort(key=lambda entry: entry["name"].lower())
+        # 面板层自己核对一遍磁盘：aMule 的 Reload 只会「加新文件」，
+        # 被删掉的文件永远留在共享列表里（还能被点、被误认为还在共享）。
+        raw_count = len(items)
+        items = self._prune_missing_shared(items)
         payload = {"items": items, "total": len(items)}
         # 空列表不覆盖已有缓存：引擎刚重连 / 重扫期间，GET_UPDATE 的这一轮
         # 可能还没把全量送过来（回的都是存根），此时解析结果是空的。
         # 把空结果写进缓存会让页面瞬间清空，看起来像"共享文件全没了"。
-        # 真清空了的话 engine_count 也是 0，下一次 force 刷新自然会把空列表带回来。
-        if items:
+        #
+        # **但「磁盘核对之后变空」是另一回事**：那是用户真的把文件删光了，
+        # 必须如实清空。否则旧快照会一直顶上来，已删文件永远赖在列表里。
+        if items or raw_count:
             return self._shared_cache_put(payload)
         with self._lock:
             stale = self._shared_cache
@@ -1914,6 +1939,103 @@ class EmuleService(object):
                 stale["at"] = time.time()
             return stale["payload"]
         return self._shared_cache_put(payload)
+
+    #: 磁盘存在性核对的缓存时间（秒）。大库遍历有成本，没必要每次请求都走一遍。
+    SHARED_EXISTS_TTL = 30.0
+
+    def _prune_missing_shared(self, items):
+        """剔除磁盘上已经不存在的共享条目。
+
+        aMule 的 Reload 只添加新文件，删除的文件不会从它的列表里消失，
+        面板照直展示就会让用户看到一堆其实已经没有的东西。这里自己扫一遍
+        共享目录做核对；任何异常都原样返回，绝不让共享页变成空白。
+        """
+        if not items:
+            return items
+        try:
+            engine = self._engine_settings()
+            roots = [path for path in (engine.get("shared_dirs") or []) if path]
+        except Exception:  # noqa: BLE001
+            return items
+        if not roots:
+            return items
+
+        now = time.time()
+        with self._lock:
+            cache = self._shared_exists_cache
+            scanned = cache.get("paths") if cache else None
+            ok_roots = cache.get("roots") if cache else None
+            fresh = bool(cache) and (now - float(cache.get("at") or 0)) < self.SHARED_EXISTS_TTL
+        if not fresh:
+            # 遍历必须留在锁外：大共享目录 os.walk 可能走很久，
+            # 持锁遍历会把所有其它引擎调用一起堵住（表现为整面板卡顿）。
+            found = set()
+            good = set()
+            for root in roots:
+                try:
+                    walked = False
+                    for dirpath, _dirnames, filenames in os.walk(root):
+                        walked = True
+                        for filename in filenames:
+                            found.add(os.path.join(dirpath, filename))
+                    # 只有「这个 root 确实走通」才把它记下来：挂载掉线 / 权限不足的
+                    # root 下面的文件查不到，但它并不是「被删了」，不能据此剔除。
+                    if walked or os.path.isdir(root):
+                        good.add(os.path.normpath(root))
+                except Exception:  # noqa: BLE001
+                    continue
+            scanned = found
+            ok_roots = good
+            with self._lock:
+                self._shared_exists_cache = {"at": now, "paths": scanned,
+                                             "roots": ok_roots}
+        ok_roots = ok_roots or set()
+        # 判据是「有没有**走通过**的共享根」，不是「有没有扫到文件」。
+        # 共享目录被清空（用户把文件全删了）时 scanned 本来就是空集，
+        # 这时恰恰最该把列表清干净；若拿 scanned 为空当「读不到」，
+        # 已删文件会永远赖在列表里 —— 正是要修的那个 bug。
+        if not ok_roots:
+            return items   # 一个根都读不到，才是真的没依据，别乱删
+
+        kept = []
+        for entry in items:
+            full = self._shared_file_path(entry)
+            if not full:
+                kept.append(entry)
+                continue
+            # 落在一个「没走通」的 root 下：无从判断，保守保留。
+            under_bad_root = any(
+                not (os.path.normpath(root) in ok_roots)
+                and full.startswith(root.rstrip(os.sep) + os.sep)
+                for root in roots
+            )
+            if under_bad_root:
+                kept.append(entry)
+                continue
+            if full in scanned or os.path.exists(full):
+                kept.append(entry)
+        return kept
+
+    @staticmethod
+    def _shared_file_path(entry):
+        """把共享条目还原成磁盘上的完整文件路径。
+
+        真机实测：EC 回给面板的 `path` 是**文件所在目录**（如
+        `/vol1/@appshare/fn-emule/Incoming`），文件名另在 `name` 里。
+        （不要被字段名 KNOWNFILE_FILENAME 误导 —— 那是 aMule 的字段名，
+        实际装的是目录。）所以必须拼起来才对得上 os.walk 的结果。
+
+        极少数情况下 path 本身已含文件名（结尾就是 name），那就直接用。
+        """
+        path = str(entry.get("path") or "").strip()
+        name = str(entry.get("name") or "").strip()
+        if not path:
+            return ""
+        if not name:
+            return path
+        if path.endswith(os.sep + name) or path == name:
+            return path
+        return os.path.join(path, name)
 
     @staticmethod
     def _shared_priority(raw):
@@ -1986,18 +2108,30 @@ class EmuleService(object):
         才认为扫描结束。期间持续刷新缓存，页面每次拉列表都能看到最新条数。
         """
         idle = 0
+        timeouts = 0
         current = None
         while idle < self.SHARED_SCAN_IDLE_ROUNDS:
             time.sleep(self.SHARED_PROGRESS_INTERVAL)
             try:
                 count = self.shared_engine_count()
             except (EmuleOffline, EmuleTimeout):
-                # 引擎正在忙或短暂离线：不算进展，也不算失败，下一轮再看
-                idle += 1
+                # 引擎正在忙或短暂离线：这既不是进展也不是「扫描停滞」，
+                # 绝不能计入 idle —— 否则连续超时 12 次就会把一个还在跑的
+                # 扫描判成「已结束」，页面显示的数字永远停在中间不动。
+                # 单独累计超时次数，够多（约 5 分钟）才放弃并如实报错。
+                timeouts += 1
+                if timeouts >= self.SHARED_SCAN_TIMEOUT_ROUNDS:
+                    with self._lock:
+                        scan = self._shared_scan
+                        if scan:
+                            scan["running"] = False
+                            scan["error"] = "引擎持续超时，无法确认扫描状态"
+                    return
                 continue
             except EmuleError:
                 idle += 1
                 continue
+            timeouts = 0
             with self._lock:
                 scan = self._shared_scan
                 if not scan or not scan.get("running"):
@@ -2093,6 +2227,30 @@ class EmuleService(object):
         }
 
     # ------------------------------------------------------------ 搜索
+    def _local_path_of(self, file_hash):
+        """在共享列表缓存里按哈希找本地文件路径。
+
+        只查内存缓存（_shared_cache_any 不看 TTL），引擎忙时也能秒回；
+        缓存没命中就返回空串，前端只显示「本地已有」不显示路径，不影响判断。
+        """
+        try:
+            payload = self._shared_cache_any() or {}
+            wanted = (file_hash or "").upper()
+            for item in (payload.get("items") or []):
+                if str(item.get("hash") or "").upper() != wanted:
+                    continue
+                # path 是目录 + name 是文件名，要拼回完整路径（真机实测）。
+                full = self._shared_file_path(item)
+                # 磁盘上真的还在才算「本地已有」：aMule 把共享目录里的文件
+                # 一律登记成「已下载」，用户删掉文件后这条记录不会自己消失，
+                # 不核对就会一直拦着不让重新下载。
+                if full and not os.path.exists(full):
+                    return ""
+                return full
+        except Exception:  # noqa: BLE001 - 查路径失败不能影响搜索结果
+            return ""
+        return ""
+
     def search_start(self, q, kind, method):
         query = (q or "").strip()
         if not query:
@@ -2122,7 +2280,12 @@ class EmuleService(object):
                 "done": False,
                 "stopped": False,
                 "messages": messages,
-                "last_progress": 0,
+                "warn": "",
+                "idle_rounds": 0,
+                "last_total": None,
+                "fallback_kad": False,
+                "stuck_99": 0,
+                "last_stuck_total": None,
                 "zero_polls": 0,
                 "poll_count": 0,
             }
@@ -2133,7 +2296,19 @@ class EmuleService(object):
 
     def _search_payload(self, session, progress, done):
         results = list(session["results"].values())
-        results.sort(key=lambda entry: (-entry["sources"], entry["name"].lower()))
+        # 排序：本地已有的排最前，其次是已在下载队列的，然后才按来源数。
+        # 以前只按来源数排，「本地已有」的常常沉到几十上百位，用户根本翻不到，
+        # 等于标了也没用。
+        def _rank(entry):
+            if entry.get("local_exists"):
+                return 0
+            if entry.get("in_queue"):
+                return 1
+            return 2
+
+        results.sort(key=lambda entry: (_rank(entry), -entry["sources"], entry["name"].lower()))
+        local_count = sum(1 for entry in results if entry.get("local_exists"))
+        queued_count = sum(1 for entry in results if entry.get("in_queue"))
         return {
             "search_id": session["search_id"],
             "progress": int(_clamp(progress, 0, 100)),
@@ -2142,8 +2317,42 @@ class EmuleService(object):
             "started_at": int(session["started_at"]),
             "query": session["q"],
             "kind": session["kind"],
+            "method": session.get("method") or "",
             "stopped": bool(session.get("stopped")),
+            # server_no_response = 服务器那半边没回应，结果是 Kad 那半边搜到的
+            "warn": str(session.get("warn") or ""),
+            # 汇总，给页面顶部显示「193 条 · 其中 2 条本地已有」
+            "counts": {"total": len(results), "local": local_count, "queued": queued_count},
         }
+
+    def _refresh_queue_flags(self, session):
+        """按当前下载队列，重新标注每条结果是「已在下载」还是「可以下载」。
+
+        只改 in_queue / already，不动 local_exists（本地库里有没有是另一回事）。
+        查询失败就保持原样，绝不因此让搜索页报错。
+        """
+        try:
+            client = self._online_client()
+            queue_hashes = {(item.get("hash") or "").upper()
+                            for item in client.download_queue()}
+        except Exception:  # noqa: BLE001 - 刷新标记失败不影响出结果
+            return
+        cached_items = (self._shared_cache_any() or {}).get("items") or []
+        for entry in (session.get("results") or {}).values():
+            file_hash = (entry.get("hash") or "").upper()
+            in_queue = file_hash in queue_hashes
+            entry["in_queue"] = in_queue
+            # 本地已有的趁这次再核对一遍磁盘：用户可能刚把文件删了，
+            # 删掉就得能重新下载，不能一直挂着「本地已有」拦着。
+            if entry.get("local_exists"):
+                fresh = self._local_path_of(file_hash)
+                if fresh:
+                    entry["local_path"] = fresh
+                elif cached_items:
+                    entry["local_exists"] = False
+                    entry["local_path"] = ""
+            # 本地已有的仍然算「不能重复下」，其余一律看队列
+            entry["already"] = in_queue or bool(entry.get("local_exists"))
 
     def search_state(self, search_id):
         with self._lock:
@@ -2151,6 +2360,9 @@ class EmuleService(object):
         if session is None:
             raise EmuleError("搜索会话不存在或已过期：%s" % search_id)
         if session["done"]:
+            # 搜索结束不等于结果冻结：用户完全可能去任务页把某个文件删了再回来。
+            # 以前这里直接返回缓存，导致「删了任务、搜索页还显示已添加、点不动」。
+            self._refresh_queue_flags(session)
             return self._search_payload(session, 100, True)
         client = self._online_client()
         try:
@@ -2161,12 +2373,47 @@ class EmuleService(object):
         except EmuleError as exc:
             session["done"] = True
             raise EmuleError("读取搜索结果失败：%s" % exc)
+        # 拿一次下载队列里真实存在的哈希：aMule 搜索结果里的 status 是它自己
+        # 维护的，删掉任务后不一定马上回落到 0，所以不能只信 status ——
+        # 直接问下载队列「你到底有没有这个文件」最可靠。
+        try:
+            in_queue_hashes = {(item.get("hash") or "").upper()
+                               for item in client.download_queue()}
+        except EmuleError:
+            in_queue_hashes = None  # 查不到就退回只看 status
         for record in records:
             file_hash = (record.get("hash") or "").upper()
             if not file_hash:
                 continue
             size = int(record.get("size") or 0)
             existing = session["results"].get(file_hash)
+            # aMule 的 SearchFile::DownloadStatus：
+            #   0=NEW（不在任何列表）1=DOWNLOADED（本地已有完整文件，在共享库）
+            #   2=QUEUED（下载中）3=CANCELED（取消过）4=QUEUEDCANCELED（取消过又在下）
+            # 1 和 2/4 对用户是两件完全不同的事：前者「我库里已经有了」，
+            # 后者「它已经在下载队列里」。混成一个「已存在」会让人反复点下载。
+            status_code = int(record.get("status") or 0)
+            # 队列优先：队列里没有这个文件，就一律当成「可以下载」，
+            # 不被引擎残留的 status=2/4 卡住。
+            if in_queue_hashes is not None:
+                queued_now = file_hash in in_queue_hashes
+            else:
+                queued_now = status_code in (2, 4)
+            local_path = ""
+            local_exists = status_code == 1
+            if local_exists:
+                local_path = self._local_path_of(file_hash)
+                if local_path:
+                    local_exists = True          # 路径核对过了，文件真在
+                else:
+                    # 共享缓存里查不到这条路径。两种情况必须区别对待：
+                    #   * 缓存里**有其他条目**、就是没有这个 hash → 文件确实被删了，放行；
+                    #   * 缓存是空的（引擎刚启动/刚重连，还没拉到列表）→ 无从核对。
+                    # 后者绝不能判成「本地已有」：那样会给出一条 local_path 为空的
+                    # 「本地已有」，用户点下载被拦、又拿不到路径，等于死锁。
+                    # 所以一律放行；若引擎真认为已在库里，search_download 的
+                    # 入队验收会如实报错，不会假成功。
+                    local_exists = False
             entry = {
                 "hash": file_hash,
                 "name": record.get("name") or "",
@@ -2175,7 +2422,10 @@ class EmuleService(object):
                 "type": _type_of(record.get("name") or ""),
                 "ext": _file_ext(record.get("name") or ""),
                 "percent": existing["percent"] if existing else 0.0,
-                "already": int(record.get("status") or 0) != 0,
+                "already": local_exists or queued_now,
+                "local_exists": local_exists,
+                "in_queue": queued_now,
+                "local_path": local_path,
                 "complete_sources": int(record.get("complete_sources") or 0),
                 "ed2k_link": "ed2k://|file|%s|%d|%s|/" % (
                     record.get("name") or "", size, file_hash),
@@ -2183,6 +2433,90 @@ class EmuleService(object):
             session["results"][file_hash] = entry
         kind = session["kind"]
         progress, done = self._judge_search(session, kind, raw_progress)
+
+        # ---- 降级 Kad：必须先于任何「判死」逻辑 ----
+        # 「全局」= 服务器 + Kad。服务器那半边不回应时，aMule 会把整次搜索卡住，
+        # 连 Kad 已经搜到的结果都不吐出来。以前这里两条收尾判定各自 done=True，
+        # 谁先命中谁就结束，降级分支永远轮不到 —— 用户只看到「卡住」。
+        # 所以把降级单独提到最前面：只要还是 global、还没降过、一条结果都没有、
+        # 并且确实停滞了，就先换成纯 Kad 搜索续跑。
+        if (not done and kind == "global" and not session.get("fallback_kad")
+                and int(session.get("stuck_99") or 0) + 1 >= self.SEARCH_STUCK99_ROUNDS
+                and not session["results"]):
+            try:
+                client.search_stop()
+                method_key = (session.get("method") or "name").strip().lower()
+                client.search_start(session["q"], _SEARCH_KIND["kad"],
+                                    file_type=_SEARCH_METHOD.get(method_key, ""))
+                session["fallback_kad"] = True
+                session["idle_rounds"] = 0
+                session["last_total"] = None
+                session["stuck_99"] = 0
+                session["warn"] = "server_no_response"
+                progress, done = 50, False
+            except EmuleError:
+                session["done"] = True
+                session["warn"] = "search_stalled_no_result"
+                progress, done = 100, True
+
+        # ---- 进度卡在 99 不动：有结果就列出来 + 标注，别让人干等 ----
+        # 只有「进度到 99 且结果条数也没再涨」才算卡住。单看 progress>=99 会误伤
+        # 正常推进到 99 的搜索（_judge_search 把 raw>0 钳到 1..99，99 是合法进度值）。
+        total_for_stuck = len(session["results"])
+        unchanged = (session.get("last_stuck_total") == total_for_stuck)
+        session["last_stuck_total"] = total_for_stuck
+        if not done and progress >= 99 and unchanged:
+            session["stuck_99"] = int(session.get("stuck_99") or 0) + 1
+            if session["stuck_99"] >= self.SEARCH_STUCK99_ROUNDS:
+                session["done"] = True
+                # 有结果 = Kad 那半边搜到了、服务器没回应；一条都没有 = 两边都没结果
+                session["warn"] = ("server_no_response" if session["results"]
+                                   else "search_stalled_no_result")
+                progress, done = 100, True
+        elif not done:
+            session["stuck_99"] = 0
+
+        # ---- 通用停滞兜底 ----
+        # 实测过两种情况：服务器完全不回应时 progress 卡在 99 不动（不是 0xFFFF），
+        # 结果一条也不进来。既然「结果有没有涨」是用户唯一有感的，就拿它当判据：
+        # 连续 SEARCH_IDLE_ROUNDS 轮（约 12 秒）条数纹丝不动，就收尾。
+        if not done:
+            total_now = len(session["results"])
+            prev_total = session.get("last_total")
+            session["last_total"] = total_now
+            if prev_total is not None and total_now == prev_total:
+                session["idle_rounds"] = int(session.get("idle_rounds") or 0) + 1
+            else:
+                session["idle_rounds"] = 0
+            if (int(session.get("idle_rounds") or 0) >= self.SEARCH_IDLE_ROUNDS
+                    and int(session.get("poll_count") or 0) >= self.SEARCH_IDLE_ROUNDS):
+                if (kind == "global" and not session.get("fallback_kad")
+                        and total_now == 0):
+                    # 「全局」= 服务器 + Kad。服务器那半边不回应时，aMule 会把整次
+                    # 搜索卡住，连 Kad 已经搜到的结果都不吐出来。
+                    # 处理办法：停掉这次卡死的搜索，换成一个纯 Kad 搜索继续跑，
+                    # 结果还是并回这个会话里 —— 用户看到的就是「全局」照样出结果，
+                    # 只是上面多一条「服务器没回应」的说明。
+                    try:
+                        client.search_stop()
+                        method_key = (session.get("method") or "name").strip().lower()
+                        client.search_start(session["q"], _SEARCH_KIND["kad"],
+                                            file_type=_SEARCH_METHOD.get(method_key, ""))
+                        session["fallback_kad"] = True
+                        session["idle_rounds"] = 0
+                        session["last_total"] = None
+                        session["warn"] = "server_no_response"
+                        progress, done = 50, False
+                    except EmuleError:
+                        session["done"] = True
+                        session["warn"] = "search_stalled_no_result"
+                        progress, done = 100, True
+                else:
+                    session["done"] = True
+                    # 一条都没搜到 = 服务器没回应且 Kad 也没有；有结果 = 服务器那半边没回应
+                    session["warn"] = ("search_stalled_no_result" if total_now == 0
+                                       else "server_no_response")
+                    progress, done = 100, True
         return self._search_payload(session, progress, done)
 
     def _judge_search(self, session, kind, raw):
@@ -2193,7 +2527,19 @@ class EmuleService(object):
         KAD    进行中=0，结束=0xfffe。
         """
         session["poll_count"] = int(session.get("poll_count") or 0) + 1
+        # 降级成纯 Kad 之后，引擎可能还残留上一轮 LOCAL 搜索的进度值（0xFFFF）。
+        # 若照 LOCAL 语义解释会返回 99，让 stuck_99 重新累计并提前把已经拿到的
+        # Kad 结果收掉。所以降级后一律按 Kad 语义处理。
+        if session.get("fallback_kad"):
+            if raw == 0xFFFE:
+                session["done"] = True
+                return 100, True
+            session["done"] = False
+            return 50, False
         if raw == 0xFFFF:
+            # LOCAL（服务器）搜索进行中。这里不自己判死，统一交给 search_state()
+            # 末尾的「结果停滞」逻辑处理 —— 那里会先尝试降级成 Kad 搜索，
+            # 直接在这里收尾会绕过降级，用户就永远拿不到 Kad 的结果。
             session["done"] = False
             return 99, False
         if raw == 0xFFFE:
@@ -2234,12 +2580,47 @@ class EmuleService(object):
         file_hash = (file_hash or "").strip().upper()
         if len(file_hash) != 32:
             raise EmuleError("文件哈希必须是 32 位十六进制：%s" % file_hash)
+        entry = session["results"].get(file_hash)
+        # 本地已有完整文件时坚决拒绝：aMule 收到重复的 ed2k 链接只会静默忽略，
+        # 以前这里照样返回「已加入下载列表」，用户以为加成功了，实际什么都没发生。
+        if entry is not None and entry.get("local_exists"):
+            where = entry.get("local_path") or entry.get("name") or file_hash
+            raise EmuleError("本地已有该文件，无需重复下载：%s" % where)
         client = self._online_client()
         client.download_search_result(file_hash)
+        # 复核：引擎对「本地已有」的链接只会静默忽略，什么都不返回。
+        # 以前这里照样报「已加入下载列表」，用户以为加上了其实队列里空空。
+        # 所以发完必须自己确认真的进了队列，没进就如实报错。
+        # 预算：每次「等 0.5s + 查一次队列」都记时，累计到 SEARCH_ACCEPT_BUDGET
+        # 就收手。面板侧 /api 预算是 15 秒，这里必须留出余量，不能占满。
+        accepted = False
+        deadline = time.time() + self.SEARCH_ACCEPT_BUDGET
+        while time.time() < deadline:
+            time.sleep(0.5)
+            # 单次查询也必须受限：download_queue 默认超时 10 秒，一次挂住就能
+            # 吃掉整个 /api 预算（15 秒）。剩余预算不足就按 1 秒封顶。
+            remain = max(0.5, min(1.5, deadline - time.time()))
+            try:
+                queue_hashes = {(item.get("hash") or "").upper()
+                                for item in client.download_queue(timeout=remain)}
+            except TypeError:
+                # 客户端没接受 timeout 参数（老实现 / 测试替身）：退回旧调用。
+                queue_hashes = {(item.get("hash") or "").upper()
+                                for item in client.download_queue()}
+            except Exception:  # noqa: BLE001 - 查不到队列就别误报失败
+                accepted = True
+                break
+            if file_hash in queue_hashes:
+                accepted = True
+                break
+        if not accepted:
+            raise EmuleError(
+                "引擎没有接受这个下载：它可能仍认为本地已有该文件。"
+                "请确认文件确实已删除后再试，或重启引擎。")
         name = ""
-        entry = session["results"].get(file_hash)
         if entry is not None:
             entry["already"] = True
+            entry["in_queue"] = True
             name = entry["name"]
         return {"ok": True, "hash": file_hash, "name": name,
                 "message": "已加入下载列表"}

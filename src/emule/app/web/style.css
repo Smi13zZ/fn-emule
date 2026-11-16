@@ -153,6 +153,18 @@ svg { display: block; }
   border-radius: 999px; background: var(--muted); color: var(--dim);
 }
 .nav-item.on .badge { background: color-mix(in srgb, var(--nav-active-fg) 14%, transparent); color: var(--nav-active-fg); }
+/* 任务计数的「↓ 下载 (↑ 上传)」这一对数字要比通用徽章大一点才看得清，
+   两个方向之间也要留出间距。只作用于 .nav-counts，其它徽章维持原尺寸。
+   max-width + 允许收缩：侧栏展开态宽度有限，数字很大时也不能把整行撑破。 */
+.nav-item .badge.nav-counts {
+  font-size: 13px; height: 20px; padding: 0 6px; gap: 4px;
+  max-width: 100%; overflow: hidden; white-space: nowrap;
+  flex-shrink: 1; min-width: 0;
+}
+.nav-counts .nc-down { color: var(--ok, #22c55e); }
+.nav-counts .nc-up { color: var(--warn, #eab308); }
+.nav-item.on .badge.nav-counts .nc-down,
+.nav-item.on .badge.nav-counts .nc-up { color: inherit; }
 /* New-release marker. It is a normal flex child (not absolutely placed), so it
    lines up with the label's optical centre and sits at the trailing edge, the
    same way the connection/alert dots do in other fnOS panels. The 2px ring in
@@ -860,6 +872,17 @@ canvas { display: block; width: 100%; height: 100%; }
 .chip.err { background: var(--danger-soft); color: var(--danger); }
 .chip.dl { background: color-mix(in srgb, var(--dl) 12%, transparent); color: var(--dl); }
 .chip.mono { font-family: var(--mono); font-size: 11.5px; }
+/* 徽章当成按钮用（搜索结果里的「本地已有 ⧉」可点复制路径）。
+   重置掉 button 的默认外观，让它看起来和旁边的 chip 完全一致。 */
+.chip.as-btn {
+  border: 0; font: inherit; cursor: pointer;
+  padding: 2px 8px; line-height: inherit;
+}
+.chip.as-btn:hover { background: color-mix(in srgb, var(--ok) 22%, transparent); }
+
+/* 搜索页顶部的「服务器没回应」提示行 */
+.warnrow { display: flex; gap: 10px; align-items: flex-start; padding: 4px 2px; }
+.warnrow-text { flex: 1; line-height: 1.6; }
 
 /* ---------------- current / in-use marker ---------------- */
 /* “当前 / 正在用” 标记：实心反转色，浅色主题近黑底白字，深色主题近白底深字。 */

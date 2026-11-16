@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>eMule</title>
 <link rel="icon" href="./images/icon.svg">
-<link rel="stylesheet" href="./style.css?v=26.11.51">
+<link rel="stylesheet" href="./style.css?v=26.11.52">
 </head>
 <body>
 <div id="app" v-cloak>
@@ -22,7 +22,10 @@
               @click="go(n.id)">
         <span class="ic" v-html="ic(n.icon)"></span>
         <span class="label">{{ t(n.key) }}</span>
-        <span class="badge" v-if="n.id === 'tasks' && taskCount">{{ taskCount }}</span>
+        <span class="badge nav-counts" v-if="n.id === 'tasks' && (downCount || upCount)">
+          <span class="nc-down">↓ {{ downCount }}</span>
+          <span class="nc-up">(↑ {{ upCount }})</span>
+        </span>
         <i class="nav-alert" v-if="n.id === 'settings' && updateNew" role="img"
            :title="t('settings.update.available', { v: updateInfo.latest })"
            :aria-label="t('settings.update.available', { v: updateInfo.latest })"></i>
@@ -568,6 +571,17 @@
           </div>
         </div>
 
+        <!-- 服务器不回应搜索时如实告知，并说明结果是 Kad 那半边给的 -->
+        <div class="card" style="margin-top:var(--gap)"
+             v-if="searchWarn === 'server_no_response' || searchWarn === 'search_stalled_no_result'">
+          <div class="warnrow">
+            <span class="chip warn">{{ t('search.warnTitle') }}</span>
+            <span class="faint warnrow-text">
+              {{ searchWarn === 'search_stalled_no_result' ? t('search.warnNoResult') : t('search.warnServerNoResponse') }}
+            </span>
+          </div>
+        </div>
+
         <div class="card" style="margin-top:var(--gap)" v-if="searchRunning || searchProgress">
           <div class="search-progress">
             <div class="progress"><i :style="{ width: Math.max(3, Math.min(100, searchProgress)) + '%' }"></i></div>
@@ -581,6 +595,7 @@
             <h3>{{ t('search.results') }}</h3>
             <div class="spacer"></div>
             <span class="chip" v-if="searchResults.length">{{ t('search.count', { n: searchResults.length }) }}</span>
+            <span class="chip ok" v-if="searchCounts.local">{{ t('search.countLocal', { n: searchCounts.local }) }}</span>
             <button class="btn sm" v-if="searchResults.length" @click="toggleAllResults">
               {{ allResultsSelected ? t('tasks.clearSel') : t('search.selectAll') }}
             </button>
@@ -611,7 +626,12 @@
                     <div class="ellipsis" style="font-weight:500" :title="r.name">{{ r.name }}</div>
                     <div class="sub">
                       <span v-if="r.percent">{{ fmt.fmtPercent(r.percent, 0) }}</span>
-                      <span v-if="r.already" class="chip ok">{{ t('search.already') }}</span>
+                      <button v-if="r.local_exists" type="button" class="chip ok as-btn"
+                              :title="(r.local_path || t('search.localExistsHint')) + ' · ' + t('search.copyPathHint')"
+                              @click.stop="copyLocalPath(r)">
+                        {{ t('search.localExists') }} ⧉
+                      </button>
+                      <span v-else-if="r.already" class="chip ok">{{ t('search.already') }}</span>
                     </div>
                   </td>
                   <td class="num mono">{{ fmt.fmtBytes(r.size) }}</td>
@@ -619,7 +639,10 @@
                   <td><span class="chip mono">{{ r.type || r.ext || '—' }}</span></td>
                   <td class="hide-sm sres-hash" :title="r.hash">{{ String(r.hash).slice(0, 16) }}</td>
                   <td class="acts">
-                    <button class="btn sm" :disabled="r.already || r.adding" @click="downloadResult(r)">
+                    <button class="btn sm" v-if="r.local_exists" @click.stop="copyLocalPath(r)">
+                      {{ t('search.copyPath') }}
+                    </button>
+                    <button class="btn sm" v-else :disabled="r.already || r.adding" @click="downloadResult(r)">
                       {{ r.already ? t('search.added') : (r.adding ? t('search.running', { v: 0 }) : t('search.download')) }}
                     </button>
                   </td>
@@ -638,10 +661,8 @@
       <template v-if="view === 'shared'">
         <div class="toolbar">
           <span class="chip">{{ t('shared.total', { n: sharedData.total || (sharedData.items || []).length }) }}</span>
-          <!-- 扫描范围：引擎只扫每个目录的顶层，子目录是面板摊平进去的。
-               把"配置了几个根 / 实际扫几个目录"摆出来，用户才能看出目录树到底
-               进没进去，而不是只看到一个对不上的条数。 -->
-          <span class="chip faint" v-if="sharedData.scan && sharedData.scan.scan_dirs">
+          <!-- 扫描范围：只在扫描进行中显示，避免扫完了还挂着「N 个目录」让人以为在排队 -->
+          <span class="chip faint" v-if="sharedProgress.running && sharedData.scan && sharedData.scan.scan_dirs">
             {{ t('shared.scanScope', { roots: sharedData.scan.shared_dirs, dirs: sharedData.scan.scan_dirs }) }}
           </span>
           <span class="chip warn" v-if="sharedData.scan && sharedData.scan.truncated" :title="t('shared.scanTruncatedHint')">
@@ -649,6 +670,15 @@
           </span>
           <span class="chip warn" v-if="sharedProgress.running">
             {{ t('shared.scanRunning', { n: sharedProgress.engine_count || 0 }) }}
+          </span>
+          <!-- 扫描失败：把后端错误如实显示出来 -->
+          <span class="chip err" v-if="!sharedProgress.running && sharedProgress.error" :title="sharedProgress.error">
+            {{ t('shared.scanFailed', { v: sharedProgress.error }) }}
+          </span>
+          <!-- 扫描完成 -->
+          <span class="chip ok"
+                v-if="!sharedProgress.running && !sharedProgress.error && sharedProgress.started_at && sharedProgress.scan_dirs">
+            {{ t('shared.scanDone', { dirs: sharedProgress.scan_dirs, n: sharedData.total || 0 }) }}
           </span>
           <div class="spacer"></div>
           <button class="btn" @click="refreshShared">
@@ -776,8 +806,8 @@
           </div>
           <div class="spacer"></div>
           <label class="switch"><input type="checkbox" v-model="logAuto"> {{ t('logs.auto') }}</label>
-          <button class="icon-btn" @click="jumpToLogEnd" :title="t('logs.bottom')" :aria-label="t('logs.bottom')">
-            <span v-html="ic('down')"></span>
+          <button class="icon-btn" @click="scrollLogTop" :title="t('logs.bottom')" :aria-label="t('logs.bottom')">
+            <span v-html="ic('up')"></span>
           </button>
           <button class="btn sm" :disabled="logsLoading" @click="loadLogs()">
             {{ logsLoading ? t('msg.loading') : t('logs.refresh') }}
@@ -1912,10 +1942,10 @@
 </div>
 
 <script src="./lib/vue.global.prod.js"></script>
-<script src="./js/i18n.js?v=26.11.51"></script>
-<script src="./js/util.js?v=26.11.51"></script>
-<script src="./js/api.js?v=26.11.51"></script>
-<script src="./js/charts.js?v=26.11.51"></script>
-<script src="./js/app.js?v=26.11.51"></script>
+<script src="./js/i18n.js?v=26.11.52"></script>
+<script src="./js/util.js?v=26.11.52"></script>
+<script src="./js/api.js?v=26.11.52"></script>
+<script src="./js/charts.js?v=26.11.52"></script>
+<script src="./js/app.js?v=26.11.52"></script>
 </body>
 </html>
