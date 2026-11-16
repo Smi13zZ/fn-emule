@@ -120,7 +120,7 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 | GET | /api/backup/status · POST /api/backup/run, /restore | 配置备份 |
 | GET | /api/maintenance/storage | 各目录占用 + 安装包清单 `{items,total,updates,updates_keep,current_version}` |
 | POST | /api/maintenance/cleanup | `{target: updates\|logs\|all, keep?, which?}` → `{removed,freed,results}` |
-| GET | /api/update/check · POST /api/update/install | GitHub Release 更新（未发布时优雅返回 no_release） |
+| GET | /api/update/check · POST /api/update/install · GET /api/update/progress | GitHub Release 更新（未发布时优雅返回 no_release） |
 | — | 版本检查节奏 | 见 §3.3：进程内每小时自查一次，前端打开期间每 30 分钟刷新 |
 
 核心载荷（前端按此渲染，字段不得随意改名）：
@@ -164,6 +164,22 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 
 // GET /api/search/{id} → {"search_id":"...","progress":100,"done":true,
 //   "results":[{hash,name,size,sources,type,ext,percent,already}],"started_at":...}
+
+// GET /api/update/progress
+// task.phase: idle | checking | downloading | installing | failed
+//   checking/downloading/installing 是"正在进行"，failed 停在失败处不会自己回 idle。
+// task.code 是语言中立的失败标识（netDns / gh403 / pkgTooBig …），界面按下表翻译，
+//   task.detail 只是拿不到 code 时的中文回退文本；成功路径上两者都是空串。
+// task.attempt 每次发起 +1：界面靠它区分"上一轮留下的失败"与"本轮真的失败"。
+// rollback 表示安装脚本这次有没有可回滚的包，false 时界面不能承诺"会自动回滚"。
+{"ok":true,
+ "task":{"running":false,"phase":"failed","code":"netDns","detail":"域名解析失败",
+         "percent":0,"received":0,"total":0,"name":"","version":"",
+         "attempt":3,"started_at":1730000000,"finished_at":1730000010},
+ "version":"26.11.53","attempt":3,"rollback":true,"log":"…最后 12 行安装日志…"}
+
+// POST /api/update/install 可带 {version,name,url}（界面已查到的那份），省掉一次网络往返；
+// 不带则服务端自己查。拒绝时返回 {ok:false, code:"busy|upToDate|noAsset|checkFailed", …}。
 ```
 
 ### 3.6 维护清理：引擎日志只能截断、当前版本包不能删（v26.11.45 新增）
@@ -179,6 +195,9 @@ src/emule/                        → 打包后 = /var/apps/fn-emule/target (TRI
 - `.part` 一律删（升级脚本只认 `.fpk`），但**更新任务正在下载时整体拒绝**（409），
   否则下载线程会写到已删的文件上。
 - 所有删除前都过 `realpath`，只允许删 `updates/` 目录内的文件。
+- **`rollback.fpk` 单独豁免，永不删除，也不占「保留 N 个」的名额。** 它是一键更新的
+  回滚底牌：升级脚本在新版本起不来时用它装回旧版本。把它算进 keep 会让“保留 2 个”
+  实际只剩 1 个真包，所以数名额前先把它从候选里排除。
 
 ### 3.5 共享目录必须摊平后交给引擎（v26.11.44 新增）
 
@@ -239,6 +258,36 @@ GET /api/settings 与 GET /api/notify 对已保存的通道密钥一律回传 SE
    不再把整份 draft（含通道密钥）回传。
 
 已经被写成 SECRET_MARK 的通道无法自动恢复（真实密钥已经丢了），需要重新填一次。
+
+### 3.7 一键更新的阶段、错误码与回滚（v26.11.53）
+
+后端只下发**语言中立的状态**，界面按当前语言自己拼句子；后端不往成功路径的
+`detail` 里塞中文，否则英文界面会冒出中文。
+
+阶段流转：
+
+    idle → checking → downloading → installing →（新进程回来）idle
+              ↘ failed（带 code + 中文 detail，不会自己回 idle）
+
+- **`busy` 判定必须包含 `checking`**：从点下去到真正开始下载之间有一段拿版本信息的
+  时间，不把它算进去，连点两次就能起两个下载。
+- **每次尝试递增 `attempt`**：失败状态会一直留着，没有编号的话重试后第一次轮询
+  读到的是上一轮的死信——弹窗当场关掉、报上次的原因，而新的一轮还在后台跑。
+  界面在发安装请求前先单独读一次 status 拿基线，轮询里遇到 `attempt <= 基线` 的
+  `failed` 就跳过，继续轮。
+- **优先用界面已查到的安装包**：`POST /api/update/install` 可以带
+  `{version,name,url}`。点「一键更新」后再走一遍网络查版本，那几秒里一个字节都没有，
+  进度条等于不存在；只有确实没给才回查，且那一阶段显示「检查中…」。
+- **下载走 `.part` 再原子改名，并且要对账长度**：服务器给了 Content-Length 就必须
+  收满，连接中途断掉时当场按网络错误报出来，而不是把半截文件改名成「完整安装包」、
+  等到解压失败才暴露。
+- **回滚包**：安装前把**当前运行版本**的包复制成 `updates/rollback.fpk`，查找目录把
+  `updates/` 放第一位（一键更新每次都下载到这里）；取最新一份并按 mtime 排序，
+  排除本次刚下的那个。找不到时界面必须诚实地说「无法自动回滚，需要到应用中心手动
+  处理」，不能继续承诺会自动回滚。是否已回滚以安装日志里有没有 `rolling back` 为准。
+- **升级脚本**由调用方用 `start_new_session` 启动，因为它要 stop 掉面板自己；
+  顺序是 stop → uninstall → install-fpk → 轮询 status（起不来才 start）→ 失败则回滚。
+  fnOS 的 `install-fpk` 不会升级已装应用，只能先卸再装。
 
 ### 3.3 版本检查节奏（v26.11.36 新增）
 
