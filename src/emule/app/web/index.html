@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>eMule</title>
 <link rel="icon" href="./images/icon.svg">
-<link rel="stylesheet" href="./style.css?v=26.11.54">
+<link rel="stylesheet" href="./style.css?v=26.11.55">
 </head>
 <body>
 <div id="app" v-cloak>
@@ -22,10 +22,6 @@
               @click="go(n.id)">
         <span class="ic" v-html="ic(n.icon)"></span>
         <span class="label">{{ t(n.key) }}</span>
-        <span class="badge nav-counts" v-if="n.id === 'tasks' && (downCount || upCount)">
-          <span class="nc-down">↓ {{ downCount }}</span>
-          <span class="nc-up">(↑ {{ upCount }})</span>
-        </span>
         <i class="nav-alert" v-if="n.id === 'settings' && updateNew" role="img"
            :title="t('settings.update.available', { v: updateInfo.latest })"
            :aria-label="t('settings.update.available', { v: updateInfo.latest })"></i>
@@ -1959,10 +1955,10 @@
 </div>
 
 <script src="./lib/vue.global.prod.js"></script>
-<script src="./js/i18n.js?v=26.11.54"></script>
-<script src="./js/util.js?v=26.11.54"></script>
-<script src="./js/api.js?v=26.11.54"></script>
-<script src="./js/charts.js?v=26.11.54"></script>
-<script src="./js/app.js?v=26.11.54"></script>
+<script src="./js/i18n.js?v=26.11.55"></script>
+<script src="./js/util.js?v=26.11.55"></script>
+<script src="./js/api.js?v=26.11.55"></script>
+<script src="./js/charts.js?v=26.11.55"></script>
+<script src="./js/app.js?v=26.11.55"></script>
 </body>
 </html>

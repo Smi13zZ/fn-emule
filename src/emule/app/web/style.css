@@ -144,25 +144,6 @@ svg { display: block; }
 .nav-item.on { background: var(--nav-active); color: var(--nav-active-fg); }
 /* sidebar glyphs are drawn a touch heavier than the default 1.8 */
 .side .nav-item svg, .side .ver-line svg { stroke-width: 2.1; }
-.nav-item .badge {
-  font-size: 11px; font-weight: 600; line-height: 1;
-  min-width: 18px; height: 18px; padding: 0 5px;
-  display: inline-flex; align-items: center; justify-content: center;
-  border-radius: 999px; background: var(--muted); color: var(--dim);
-}
-.nav-item.on .badge { background: color-mix(in srgb, var(--nav-active-fg) 14%, transparent); color: var(--nav-active-fg); }
-/* 任务计数的「↓ 下载 (↑ 上传)」这一对数字要比通用徽章大一点才看得清，
-   两个方向之间也要留出间距。只作用于 .nav-counts，其它徽章维持原尺寸。
-   max-width + 允许收缩：侧栏展开态宽度有限，数字很大时也不能把整行撑破。 */
-.nav-item .badge.nav-counts {
-  font-size: 13px; height: 20px; padding: 0 6px; gap: 4px;
-  max-width: 100%; overflow: hidden; white-space: nowrap;
-  flex-shrink: 1; min-width: 0;
-}
-.nav-counts .nc-down { color: var(--ok, #22c55e); }
-.nav-counts .nc-up { color: var(--warn, #eab308); }
-.nav-item.on .badge.nav-counts .nc-down,
-.nav-item.on .badge.nav-counts .nc-up { color: inherit; }
 /* New-release marker. It is a normal flex child (not absolutely placed), so it
    lines up with the label's optical centre and sits at the trailing edge, the
    same way the connection/alert dots do in other fnOS panels. The 2px ring in
@@ -180,8 +161,7 @@ svg { display: block; }
   transform: translateY(-50%); box-shadow: none;
 }
 .shell.collapsed .nav-item { justify-content: center; padding: 8px 0; gap: 0; }
-.shell.collapsed .nav-item .label,
-.shell.collapsed .nav-item .badge { display: none; }
+.shell.collapsed .nav-item .label { display: none; }
 
 .side-foot {
   margin-top: auto; padding: 10px 10px 12px;

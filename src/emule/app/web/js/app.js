@@ -378,13 +378,6 @@
       tasks: function () {
         return this.transfersData.items || [];
       },
-      // 分开算：downCount = 我加过的下载任务（不含上传），upCount = 当前上传中的 peer 数
-      downCount: function () {
-        return this.tasks.filter(function (x) { return x.kind !== "upload"; }).length;
-      },
-      upCount: function () {
-        return this.tasks.filter(function (x) { return x.kind === "upload"; }).length;
-      },
       visibleTasks: function () {
         const self = this;
         const q = this.search.trim().toLowerCase();
