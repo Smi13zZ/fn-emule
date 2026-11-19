@@ -488,7 +488,7 @@ class Store(object):
             ("amuled_log1", "引擎日志（上一份）", os.path.join(self.var_dir, "amuled.log.1"), "file"),
             ("panel_log", "面板日志", self.log_path, "file"),
             ("panel_log1", "面板日志（上一份）", self.log_path + ".1", "file"),
-            ("update_log", "更新安装日志", os.path.join(self.var_dir, "update-install.log"), "file"),
+            ("update_log", "更新安装日志", os.path.join(self.update_dir, "install.log"), "file"),
         ):
             if kind == "dir":
                 size, files = walk_size(path)

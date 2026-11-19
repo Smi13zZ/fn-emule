@@ -3523,13 +3523,35 @@ def rollback_path():
     return os.path.join(RT.store.updates_dir(), ROLLBACK_NAME)
 
 
+def update_log_path():
+    """更新安装日志的位置：放在更新包目录里，和安装脚本的日志同名（install.log）。"""
+    return os.path.join(RT.store.update_dir, "install.log")
+
+
+def migrate_update_log(store):
+    """旧版把日志写在 var 根目录（update-install.log），启动时挪进 updates/。
+
+    只在旧文件存在、新位置为空时搬一次；失败只记日志，不影响启动。
+    """
+    old = os.path.join(store.var_dir, "update-install.log")
+    new = os.path.join(store.update_dir, "install.log")
+    try:
+        if not os.path.isfile(old) or os.path.exists(new):
+            return
+        os.makedirs(store.update_dir, exist_ok=True)
+        os.replace(old, new)
+        store.log("更新安装日志已迁移到 %s" % new)
+    except OSError as exc:
+        store.log("迁移更新安装日志失败：%r" % (exc,))
+
+
 def update_log_tail(lines=12):
     """升级脚本日志的最后几行，给界面的「查看详情」用。
 
     只在 installing 之后才有意义：下载阶段这个文件里留着的还是上一次的记录，
     贴出来会让人以为刚刚发生了回滚。
     """
-    path = os.path.join(RT.store.var_dir, "update-install.log")
+    path = update_log_path()
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             rows = handle.read().strip().splitlines()
@@ -3651,7 +3673,7 @@ def run_update_task(url, dest, name, version, attempt=0):
             pkg=result["path"],
             prev=prev,
             env_path=env_path,
-            log_path=os.path.join(var_dir, "update-install.log"),
+            log_path=update_log_path(),
         )
         with open(script_path, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(script)
@@ -3811,6 +3833,7 @@ def build_runtime(args):
     store = storemod.Store(var_dir, share_dir=share_dir, app_home=app_home, version=version)
     store.load()
     store.ensure_dirs()
+    migrate_update_log(store)
 
     port = int_or(args.port, 0)
     if port <= 0:
