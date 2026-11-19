@@ -2241,7 +2241,7 @@
         const self = this;
         const v = (this.updateInfo && this.updateInfo.latest) || "";
         this.confirmBox = {
-          title: this.t("settings.update.installingTitle", { v: v }),
+          title: this.t("settings.update.install"),
           text: this.t("settings.update.confirm", { v: v }),
           okText: this.t("settings.update.install"),
           onOk: async function () {
