@@ -3455,7 +3455,7 @@ class Handler(BaseHTTPRequestHandler):
 
 #: 「更新正在跑」的阶段集合。busy 判定必须包含 checking：点下去到真正开始
 #: 下载之间有一段拿版本信息的时间，不把它算进去，连点两次就能起两个下载。
-UPDATE_ACTIVE_PHASES = ("checking", "downloading", "installing")
+UPDATE_ACTIVE_PHASES = ("checking", "downloading", "verifying", "installing")
 
 #: 回滚包固定叫这个名字放进 updates/。清理逻辑要单独豁免它 ——
 #: 它不占「保留 N 个包」的名额，也不在任何情况下被删掉。
@@ -3620,12 +3620,34 @@ def _update_task_set(**kwargs):
         RT._update_task.update(kwargs)
 
 
+def _reset_update_log():
+    """清空更新安装日志，作为一轮升级的起点。
+
+    安装脚本是追加写的，上一轮的结束语还在文件尾部。后端按尾部认结论，
+    「查看详情」也直接贴尾部 —— 都不清就会把上一轮的结果当成这一轮的。
+    失败只记日志不影响升级：读不到旧日志比不升级好。
+    """
+    path = update_log_path()
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "wb"):
+            pass
+    except OSError as exc:
+        RT.log("清空更新安装日志失败：%r" % (exc,), level="warn")
+
+
 def run_update_task(url, dest, name, version, attempt=0):
     """在后台线程里完成下载、校验与升级脚本启动，进度写进 RT._update_task。
 
     任何一步失败都落到 phase=failed 并带上 code；成功路径的 detail 一律留空 ——
     阶段文案由界面按当前语言自己拼。
     """
+    # 每轮开工先清空上一轮的安装日志。日志只追加，上一轮的
+    # 「=== update finished ===」还在尾部；不清掉的话，本轮刚开始就被
+    # 认成「已经成功」，界面会当场切到完成态、紧接着撞进卸载重装的
+    # 离线窗口。清空是这一轮的起点，不是可选项。
+    _reset_update_log()
+
     def on_progress(received, total):
         percent = int(received * 100 / total) if total else 0
         _update_task_set(received=int(received), total=int(total or 0),
@@ -3646,6 +3668,12 @@ def run_update_task(url, dest, name, version, attempt=0):
         failed(exc)
         return
 
+    # 校验单独一阶段：下载完到开始装之间要解包读 manifest，
+    # 这段时间进度区没有总量可测，界面上必须能看出「还在做事」，
+    # 否则下载 100% 之后会静止好几秒，看起来像卡住。
+    _update_task_set(phase="verifying", percent=100,
+                     received=int(result.get("size") or 0),
+                     total=int(result.get("size") or 0))
     try:
         validate_fpk(result["path"])
     except Exception as exc:  # noqa: BLE001

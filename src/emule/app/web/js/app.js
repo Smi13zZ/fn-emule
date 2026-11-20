@@ -242,6 +242,12 @@
         updateBanner: true,
         /* 一键更新的下载进度（后台任务轮询回来的） */
         updateProgress: { percent: 0, phase: "idle", received: 0, total: 0 },
+        /* 阶段单调性只在同一轮尝试内成立：attempt 变了就要整体重置，
+           否则上一轮停在 installing、这一轮从 checking 开始会被判成后退。 */
+        updateMonoAttempt: -1,
+        /* 自动重试刷新超过 10 次后放出的自救按钮：浏览器若已停在错误页上，
+           自动重试是回不来的，至少留一个能自己点的入口。 */
+        updateReloadReady: false,
         /* 服务端每次尝试递增的编号。失败状态在服务端会一直留着，界面靠它
            区分「上一轮的死信」与「本轮真的失败了」。 */
         updateAttempt: 0,
@@ -2281,7 +2287,11 @@
           const r = await window.EMU_API.installUpdate(this.updateInfo || null);
           if (r && r.ok === false) throw this._refusal(r);
           if (typeof r.attempt === "number") this.updateAttempt = r.attempt;
-          if (r && r.task) this.applyUpdateTask(r.task);
+          /* 不解安装响应里的 task：那是后端刚置成 downloading 的一帧快照，
+             total 还是 0。拿它绘制会把已经跑起来的进度条打回「准备中」，
+             紧接着就是 20 秒停机窗口 —— 用户看到的就是一个冻住的遮罩。
+             进度只认轮询，这里只取编号与回滚包信息。 */
+          if (r && typeof r.rollback === "boolean") this.updateRollbackReady = r.rollback;
         } catch (e) {
           clearTimeout(this.installTimer);
           this.updateInstalling = false;
@@ -2317,31 +2327,70 @@
         if (err && typeof err.rollback === "boolean") this.updateRollbackReady = err.rollback;
       },
       /* 服务端进度是瞬时快照，网速快时两次轮询之间能差几十个百分点。
-         显示值只增不减，避免进度条回头跳。 */
+         三条收敛规则缺一不可，否则界面会被旧快照打回去：
+
+         1. 阶段只允许前进。checking < downloading < verifying < installing，
+            后退的快照整帧丢弃 —— 快照来自另一个更早的时刻，它描述的
+            「进度」已经过时了。
+         2. total 只增不减，但只在 downloading 分支内。进入安装/校验后
+            总量本来就没有意义，那里清零是**有意**的，不能算「减少」。
+         3. 单调性只在同一 attempt 内成立。attempt 变了说明是新一轮，
+            必须整体重置：上一轮停在 installing、total 是 10 MB，
+            而这一轮从 checking、3 MB 的包开始，不重置就永远动不了。 */
       applyUpdateTask: function (task) {
         if (!task) return;
+        const ORDER = { checking: 0, downloading: 1, verifying: 2, installing: 3 };
+        const rawPhase = String(task.phase || "downloading");
+        const attempt = typeof task.attempt === "number" ? task.attempt : 0;
+
+        if (attempt !== this.updateMonoAttempt) {
+          this.updateMonoAttempt = attempt;
+          this.updateProgress = { percent: 0, phase: "idle", received: 0, total: 0 };
+        }
+
         const prev = this.updateProgress || {};
+        const prevRank = ORDER[String(prev.phase || "idle")];
+        const nextRank = ORDER[rawPhase];
+        // 认不出的阶段（旧后端 / 新加的值）不参与比较，原样接受
+        if (prevRank !== undefined && nextRank !== undefined && nextRank < prevRank) {
+          return;
+        }
+
+        const phase = rawPhase;
         const nextPct = Number(task.percent) || 0;
-        const phase = task.phase || "downloading";
-        this.updateProgress = {
+        const nextTotal = Number(task.total) || 0;
+        const nextReceived = Number(task.received) || 0;
+
+        const progress = {
           percent: Math.max(Number(prev.percent) || 0, nextPct),
           phase: phase,
-          received: Number(task.received) || 0,
-          total: Number(task.total) || 0,
+          received: Math.max(Number(prev.received) || 0, nextReceived),
+          total: nextTotal,
         };
+        // total 只增：仅在下载阶段累积。校验/安装阶段没有可测总量，
+        // 保持服务端给的 0，让进度区退回「准备中」而不是继续假装百分比。
+        if (phase === "downloading") {
+          progress.total = Math.max(Number(prev.total) || 0, nextTotal);
+        } else {
+          progress.total = 0;
+        }
+        this.updateProgress = progress;
+
         /* 阶段文案一律由前端按当前语言拼：服务端的 detail 只在失败时才有
            意义（翻译好的原因），成功路径上是空串，直接回显会让英文界面
-           冒出中文。进入安装后总量不再有意义，把 total 清零让进度区切成
-           「准备中」，不假装还有百分比。 */
+           冒出中文。 */
         if (phase === "checking") {
           this.updateInstallDetail = this.t("settings.update.checking");
         } else if (phase === "downloading") {
           this.updateInstallDetail = this.t("settings.update.installingDownload");
+        } else if (phase === "verifying") {
+          this.updateInstallDetail = this.t("settings.update.installingVerify");
         } else if (phase === "installing") {
           this.updateInstallDetail = this.t("settings.update.installingReady");
-          this.updateProgress = Object.assign({}, this.updateProgress, { total: 0 });
         }
-        if (phase === "downloading" || phase === "installing") this._updateSawActive = true;
+        if (phase === "downloading" || phase === "verifying" || phase === "installing") {
+          this._updateSawActive = true;
+        }
       },
       pollUpdateProgress: function (fromVersion) {
         const self = this;
@@ -2425,8 +2474,36 @@
           self.updateInstalling = false;
           // 面板刚从卸载重装里回来，等它把引擎也拉起来
           self.bootstrapPanel().catch(function () {});
-          setTimeout(function () { location.reload(); }, 1500);
+          self.reloadWhenBack(0);
         }, 1500);
+      },
+
+      /* 装完后的自动刷新要等面板真的回来再刷。
+         升级脚本是「停服务 → 卸载 → 安装 → 启动」，成功结论出现的那一刻服务
+         往往正要停：这时立刻 location.reload() 等于主动撞进离线空窗，
+         浏览器停在错误页上再也回不来 —— 用户看到的就是「更新完卡住刷不出来」。
+         所以改成先探一次 health（能答上来说明新进程已经在服务），拿不到就退避重试。 */
+      /* 自救按钮：浏览器若已停在断网错误页上，只有用户自己点一下才回得来。
+         模板里不能写 location.reload()（in-DOM 模板取不到 location），
+         所以包一层方法。 */
+      reloadNow: function () {
+        try { location.reload(); } catch (e) { /* ignore */ }
+      },
+
+      reloadWhenBack: function (attempt) {
+        const self = this;
+        const n = Number(attempt) || 0;
+        window.EMU_API.health().then(function () {
+          try { location.reload(); } catch (e) { /* ignore */ }
+        }).catch(function () {
+          // 等太久就把「立即重新加载」放出来：万一浏览器已经停在断网错误页上，
+          // 自动重试是回不来的，用户至少有一个按钮可以自己再试一次。
+          if (n >= 10) {
+            self.updateReloadReady = true;
+          }
+          if (n >= 100) { try { location.reload(); } catch (e) { /* ignore */ } return; }
+          setTimeout(function () { self.reloadWhenBack(n + 1); }, 800);
+        });
       },
 
       /* ---------------- charts ---------------- */

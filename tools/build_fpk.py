@@ -193,6 +193,20 @@ def main():
         raise SystemExit("结构检查失败，已中止打包")
     print("       结构正常")
 
+    # 升级进度收敛闸门：三条单调性规则（阶段只前进 / total 只增 /
+    # attempt 隔离）是「点一键更新后卡在遮罩里」的直接成因。纯静态检查，
+    # 放在回归测试之前：失败就不出包。
+    mono_checker = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "check_update_mono.py")
+    if os.path.isfile(mono_checker):
+        res = subprocess.run([sys.executable, mono_checker], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace")
+        if res.returncode != 0:
+            sys.stderr.write(res.stdout or "")
+            sys.stderr.write(res.stderr or "")
+            raise SystemExit("升级进度收敛规则缺失，已中止打包")
+        print("       升级进度收敛规则正常")
+
     # 回归闸门：这几条是踩过的坑，语法与结构检查都抓不到 —— 它们只在真实负载下
     # 才暴露（共享库一大，页面就整块 504）。放进打包流程，避免改了别处又退回去。
     print("[0c/3] 回归测试（共享取数 / 目录清单 / 引擎队列）")
