@@ -313,6 +313,21 @@ def strip_html(raw):
     return re.sub(r"\n{3,}", "\n\n", html_unescape(text)).strip()
 
 
+#: 三层来源的默认地址。环境变量可以整体覆盖，用于把整条链路指向本地桩服务
+#: 做端到端验证（真实发布流程里永远是官方地址）。
+DEFAULT_API_BASE = "https://api.github.com"
+DEFAULT_WEB_BASE = "https://github.com"
+
+
+def _resolve_base(explicit, env_name, fallback):
+    """基址解析：显式参数 > 环境变量 > 默认值。
+
+    末尾斜杠一律去掉，拼路径时才不会出现 `//repos`。
+    """
+    value = str(explicit or os.environ.get(env_name) or fallback).strip()
+    return value.rstrip("/") or fallback
+
+
 class UpdateChecker(object):
     """GET /api/update/check 的实现。
 
@@ -358,8 +373,14 @@ class UpdateChecker(object):
         }
 
     # -- 三个来源：REST API / releases.atom / expanded_assets -----------------
+    def api_base(self):
+        return _resolve_base("", "EMULE_UPDATE_API_BASE", DEFAULT_API_BASE)
+
+    def web_base(self):
+        return _resolve_base("", "EMULE_UPDATE_WEB_BASE", DEFAULT_WEB_BASE)
+
     def _from_api(self, repo):
-        data = netutil.get_json("https://api.github.com/repos/%s/releases/latest" % repo,
+        data = netutil.get_json("%s/repos/%s/releases/latest" % (self.api_base(), repo),
                                 timeout=10.0, retries=1,
                                 accept="application/vnd.github+json")
         if not isinstance(data, dict):
@@ -385,7 +406,8 @@ class UpdateChecker(object):
 
         家用宽带出口 IP 共享，匿名 60 次/小时的限额很容易打满，所以要有退路。
         """
-        xml = netutil.get_text("https://github.com/%s/releases.atom" % repo, timeout=10.0)
+        xml = netutil.get_text("%s/%s/releases.atom" % (self.web_base(), repo),
+                               timeout=10.0)
         entry = re.search(r"<entry>(.*?)</entry>", xml, re.S)
         if not entry:
             raise netutil.FetchError("releases.atom 里没有发布条目")
@@ -415,8 +437,8 @@ class UpdateChecker(object):
     def _assets_from_html(self, repo, tag):
         """API 拿不到资产列表时，从 releases/expanded_assets 这份 HTML 片段里抠下载链接。"""
         page = netutil.get_text(
-            "https://github.com/%s/releases/expanded_assets/%s"
-            % (repo, urllib.parse.quote(tag)), timeout=10.0)
+            "%s/%s/releases/expanded_assets/%s"
+            % (self.web_base(), repo, urllib.parse.quote(tag)), timeout=10.0)
         assets = []
         seen = set()
         for href in re.findall(r'href="(/[^"]+/releases/download/[^"]+)"', page):
@@ -3545,6 +3567,33 @@ def migrate_update_log(store):
         store.log("迁移更新安装日志失败：%r" % (exc,))
 
 
+#: appcenter-cli 把终端转圈动画直接写进了重定向的日志：`\r\ stopping.\r| stopping.`
+#: 这类片段。按行切分后一条动画会变成几十行阶梯状的「stopping...」，把真正有用
+#: 的 `[Info]` 行挤出窗口，界面上只剩噪音。这里只保留能读的行。
+_SPINNER_WORDS = frozenset((
+    "stopping", "installing", "starting", "uninstalling", "verifying files",
+    "verifying", "downloading", "extracting", "compressing", "removing",
+    "cleaning", "unpacking", "upgrading",
+))
+
+
+def clean_install_log(text):
+    """滤掉 appcenter-cli 的转圈帧，只留真正能读的日志行。"""
+    out = []
+    for row in (text or "").splitlines():
+        s = row.strip()
+        if not s:
+            continue
+        # 纯符号帧（`.` / `..` / `\ ...`）
+        if set(s) <= set("-\\|/. \t"):
+            continue
+        word = s.lstrip("-\\|/").strip().rstrip(".").strip().lower()
+        if word in _SPINNER_WORDS:
+            continue
+        out.append(s)
+    return out
+
+
 def update_log_tail(lines=12):
     """升级脚本日志的最后几行，给界面的「查看详情」用。
 
@@ -3554,7 +3603,7 @@ def update_log_tail(lines=12):
     path = update_log_path()
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            rows = handle.read().strip().splitlines()
+            rows = clean_install_log(handle.read())
     except OSError:
         return ""
     return "\n".join(rows[-lines:])

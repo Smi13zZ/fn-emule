@@ -21,6 +21,7 @@ import argparse
 import base64
 import os
 import posixpath
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -206,6 +207,21 @@ def main():
             sys.stderr.write(res.stderr or "")
             raise SystemExit("升级进度收敛规则缺失，已中止打包")
         print("       升级进度收敛规则正常")
+
+    # Release 正文渲染器：渲染效果 + 注入防护。正文是外网内容，安全那条更重要。
+    # node 不在 PATH 上时跳过（不影响打包，只是少一道检查）。
+    node_bin = os.environ.get("NODE_BIN") or shutil.which("node") or shutil.which("node.exe")
+    md_test = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_md.js")
+    if node_bin and os.path.isfile(md_test):
+        res = subprocess.run([node_bin, md_test], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace")
+        if res.returncode != 0:
+            sys.stderr.write(res.stdout or "")
+            sys.stderr.write(res.stderr or "")
+            raise SystemExit("Markdown 渲染器自检失败，已中止打包")
+        print("       Markdown 渲染器正常")
+    else:
+        print("       Markdown 渲染器自检跳过（无 node）")
 
     # 回归闸门：这几条是踩过的坑，语法与结构检查都抓不到 —— 它们只在真实负载下
     # 才暴露（共享库一大，页面就整块 504）。放进打包流程，避免改了别处又退回去。

@@ -235,6 +235,9 @@
         updateInstalling: false,
         updateError: "",
         updateInstallDetail: "",
+        /* 安装日志尾部：服务端每次轮询都带着它。只在失败时展示 —— 升级途中
+           这堆输出用户看不懂也帮不上忙，失败时它是唯一能说清卡在哪一步的证据。 */
+        updateInstallLog: "",
         /* 全局失败提示条：从任意页面发起更新都可能失败，那时用户不在设置页，
            只在设置卡片里显示等于什么都没说。带「查看详情」并单独可关。 */
         updateFailText: "",
@@ -2206,6 +2209,18 @@
         const fromCfg = this.draft && this.draft.update && this.draft.update.repo;
         return fromInfo || fromCfg || "Smi13zZ/fn-emule";
       },
+      /* Release 正文是 Markdown，渲染成 HTML 给 v-html。md.js 会先把整段
+         转义再套标签，所以正文里的 <script> / javascript: 都执行不了。
+         md.js 没加载上时退回纯文本 —— 排版可以丢，不能把原文当 HTML 插进去。 */
+      updateNotesHtml: function () {
+        const info = this.updateInfo || {};
+        const raw = info.notes || "";
+        if (!raw) return "";
+        if (window.MD) return window.MD.render(raw);
+        return String(raw)
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          .replace(/\r?\n/g, "<br>");
+      },
       checkUpdate: async function (force) {
         /* 手动点「检查更新」时如果正好有一次自动检查在飞，别把它丢掉：
            挂个标记，等这一轮结束后再按用户意图强制重查一次。 */
@@ -2259,6 +2274,7 @@
         this.updateInstalling = true;
         this.updateError = "";
         this.updateFailText = "";
+        this.updateInstallLog = "";
         this.updateProgress = { percent: 0, phase: "checking", received: 0, total: 0 };
         this.updateInstallDetail = this.t("settings.update.checking");
         this.updateTargetVersion = (this.updateInfo && this.updateInfo.latest) || "";
@@ -2403,6 +2419,10 @@
             misses = 0;
             if (r && typeof r.attempt === "number") self.updateAttempt = r.attempt;
             if (r && typeof r.rollback === "boolean") self.updateRollbackReady = r.rollback;
+            /* 日志尾部每次都收下，但只在失败时展示（模版按 updateError 判断）。
+               下载阶段文件里还是上一次的记录，收下也无妨 —— 那一帧还没有
+               updateError，不会被显示出来。 */
+            if (r && typeof r.log === "string") self.updateInstallLog = r.log;
             const task = (r && r.task) || {};
             if (task.phase === "failed") {
               /* 服务端不会自己回到 idle，重试的头几百毫秒读到的还是上一次的
@@ -2468,8 +2488,9 @@
          「100 B / 100 B」。下载结束后真实总量本来就在，保持不动。 */
       finishUpdate: function (version) {
         const self = this;
+        /* 遮罩上那行已经把「已更新到 vX，正在刷新…」写全了，这里不再另弹一条
+           右下角提示：同样的字出现两次，而且遮罩一关它就没有上下文了。 */
         this.updateInstallDetail = this.t("settings.update.done", { v: version || "" });
-        this.ok("settings.update.done", { v: version || "" });
         setTimeout(function () {
           self.updateInstalling = false;
           // 面板刚从卸载重装里回来，等它把引擎也拉起来
