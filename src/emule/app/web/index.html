@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>eMule</title>
 <link rel="icon" href="./images/icon.svg">
-<link rel="stylesheet" href="./style.css?v=26.11.59">
+<link rel="stylesheet" href="./style.css?v=26.11.60">
 </head>
 <body>
 <div id="app" v-cloak>
@@ -1572,7 +1572,7 @@
                  桌面上 display:contents 让按钮回到与文字同一行。 -->
             <div class="vactions">
               <button class="btn sm" type="button" :disabled="updateChecking || updateInstalling" @click="checkUpdate(true)">
-                <span class="ic" v-html="ic('refresh')"></span>{{ updateChecking ? t('settings.update.checking') : t('settings.update.check') }}
+                <span class="ic" :class="{ spinning: updateChecking }" v-html="ic('refresh')"></span>{{ updateChecking ? t('settings.update.checking') : t('settings.update.check') }}
               </button>
               <button class="btn sm primary" type="button" v-if="updateNew" :disabled="updateInstalling" @click="askInstallUpdate">
                 <span class="ic" v-html="ic('download')"></span>{{ updateInstalling ? t('settings.update.installing') : t('settings.update.install') }}
@@ -1977,11 +1977,11 @@
 </div>
 
 <script src="./lib/vue.global.prod.js"></script>
-<script src="./js/i18n.js?v=26.11.59"></script>
-<script src="./js/util.js?v=26.11.59"></script>
-<script src="./js/api.js?v=26.11.59"></script>
-<script src="./js/charts.js?v=26.11.59"></script>
-<script src="./js/md.js?v=26.11.59"></script>
-<script src="./js/app.js?v=26.11.59"></script>
+<script src="./js/i18n.js?v=26.11.60"></script>
+<script src="./js/util.js?v=26.11.60"></script>
+<script src="./js/api.js?v=26.11.60"></script>
+<script src="./js/charts.js?v=26.11.60"></script>
+<script src="./js/md.js?v=26.11.60"></script>
+<script src="./js/app.js?v=26.11.60"></script>
 </body>
 </html>

@@ -515,7 +515,7 @@
     "settings.update.upSub": "有新版本发布时会在这里提示。",
           "settings.update.latest": "最新版本",
           "settings.update.check": "检查更新",
-          "settings.update.checking": "检查中…",
+          "settings.update.checking": "正在检查…",
           "settings.update.available": "发现新版本 v{v}",
           "settings.update.noRelease": "仓库暂无已发布版本",
           "settings.update.notChecked": "尚未检查",
