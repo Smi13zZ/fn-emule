@@ -65,6 +65,31 @@ check('校验失败返回 400 且不落盘', '设置未保存' in src)
 # 目录校验只碰文件系统，不该排进引擎队列（引擎卡在慢调用时会一起被堵）
 check('目录校验不走 EC 队列', 'RT.call("check_dir"' not in src)
 
+print('6) 迁移提示卡片的样式要跟其余警告卡片一致（不加粗左边框）')
+CSS = os.path.join(REPO, 'src', 'emule', 'app', 'web', 'style.css')
+css = open(CSS, encoding='utf-8').read()
+
+
+def rule(selector):
+    """取出某个选择器的规则块（第一个匹配的顶层规则）。"""
+    i = css.find(selector + ' {')
+    if i < 0:
+        return ''
+    j = css.find('}', i)
+    return css[i:j]
+
+
+dirmig = rule('.dirmig')
+check('有 .dirmig 规则', bool(dirmig))
+check('没有加粗左边框', 'border-left' not in dirmig, dirmig.replace('\n', ' '))
+check('保留整体 1px 边框', 'border: 1px solid' in dirmig)
+# 项目里警告类卡片的底子是 --card，不是 transparent（否则浅色主题下透出白底发灰）
+check('底色基于 --card', 'var(--card)' in dirmig, dirmig.replace('\n', ' '))
+# 与已有的上行提示条保持同一套写法
+upbanner = rule('.upbanner')
+check('.upbanner 也是 1px + --card（同一套写法）',
+      'border: 1px solid' in upbanner and 'var(--card)' in upbanner)
+
 print('')
 if FAILS:
     print('FAILED: ' + ', '.join(FAILS))

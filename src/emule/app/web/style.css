@@ -1029,9 +1029,8 @@ canvas { display: block; width: 100%; height: 100%; }
   display: flex; align-items: flex-start; gap: 12px;
   padding: 10px 12px; margin: -4px 0 14px;
   border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
-  border-left: 3px solid var(--warn);
   border-radius: var(--radius);
-  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  background: color-mix(in srgb, var(--warn) 8%, var(--card));
 }
 .dirmig-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; line-height: 1.6; }
 .dirmig-text b { color: var(--text); font-weight: 600; }
