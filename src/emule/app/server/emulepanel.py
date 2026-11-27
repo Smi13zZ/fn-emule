@@ -50,6 +50,9 @@ VERSION_FALLBACK = "26.11.0"
 DEFAULT_PORT = storemod.DEFAULT_PANEL_PORT
 DATA_TIMEOUT = 15.0        # CONTRACT：任何 /api 请求最多 15 秒，超时 504
 CONTROL_TIMEOUT = 15.0     # 引擎启停同样受 15 秒约束
+#: 后台重启任务的预算（秒）。停 aMule 要等 partfile 落盘、起又要等 EC 就绪，
+#: 15 秒不够，但这个等待不占 /api 请求，可以给宽一点。
+ENGINE_RESTART_BUDGET = 120.0
 HEALTH_TIMEOUT = 2.5
 SAMPLE_INTERVAL = 3.0      # 速度历史采样间隔（CONTRACT §8）
 NOTIFY_INTERVAL = 5.0      # 任务完成/出错检测间隔
@@ -593,6 +596,12 @@ class Runtime(object):
         self.engine_detail = ""
         self._last_status = {"running": False, "pid": 0, "ec": False, "uptime": 0}
         self.control_lock = threading.RLock()
+        # 引擎重启是后台任务（要等 partfile 落盘，超过 /api 预算），用这把锁去重
+        self._restart_guard = threading.Lock()
+        self._restarting = False
+        # 临时目录迁移同样是后台任务，状态放这里给 /api 轮询
+        self._migrate_guard = threading.Lock()
+        self._migrate = {"running": False}
         self.host = ""
         self.http_lock = threading.RLock()
         self.http_servers = []
@@ -797,6 +806,128 @@ class Runtime(object):
             raise OfflineError(message)
         except self.err_error as exc:
             raise EngineFailure(str(exc) or "引擎操作失败")
+
+    def schedule_engine_restart(self):
+        """把「停引擎 → 起引擎」排到后台线程，立刻返回 True。
+
+        为什么不就地同步重启：停引擎要等 aMule 把 partfile 落盘（大文件十几秒），
+        起引擎又要等 EC 端口就绪，加起来必然超过面板 15 秒的 /api 预算。
+        就地做只会让前端收到超时、而引擎其实还在重启，比不做更糟。
+
+        同一时刻只允许一个重启任务在跑：连点两次保存不应该叠两轮重启。
+        """
+        if self.service is None:
+            return False
+        with self._restart_guard:
+            if self._restarting:
+                return True
+            self._restarting = True
+
+        def worker():
+            try:
+                with self.control_lock:
+                    self.engine_phase = "restarting"
+                    self.engine_detail = ""
+                    try:
+                        self.call("restart", timeout=ENGINE_RESTART_BUDGET)
+                        self.engine_phase = "running"
+                        self.engine_detail = ""
+                        self.log("引擎已按新设置重启")
+                    except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing) as exc:
+                        self.engine_phase = "failed"
+                        self.engine_detail = str(exc)
+                        self.log("引擎重启失败：%s" % (exc,), level="error")
+            finally:
+                with self._restart_guard:
+                    self._restarting = False
+
+        threading.Thread(target=worker, name="engine-restart", daemon=True).start()
+        return True
+
+    # -- 临时目录迁移（后台任务） --------------------------------------
+    def temp_migrate_state(self):
+        """给前端轮询的迁移状态。永远返回一个结构，不抛异常。"""
+        with self._migrate_guard:
+            return {
+                "ok": True,
+                "running": bool(self._migrate.get("running")),
+                "phase": self._migrate.get("phase") or "idle",
+                "from": self._migrate.get("from") or "",
+                "to": self._migrate.get("to") or "",
+                "count": int(self._migrate.get("count") or 0),
+                "moved": list(self._migrate.get("moved") or []),
+                "error": self._migrate.get("error") or "",
+                "warning": self._migrate.get("warning") or "",
+            }
+
+    def start_temp_migrate(self, old_dir, new_dir):
+        """起一个后台迁移任务；已有任务在跑时返回 False。"""
+        if self.service is None:
+            raise ServiceMissing("引擎组件不可用（core.service 未加载）")
+        with self._migrate_guard:
+            if self._migrate.get("running"):
+                return False
+            self._migrate = {"running": True, "phase": "starting",
+                             "from": old_dir, "to": new_dir,
+                             "count": 0, "moved": [], "error": "", "warning": ""}
+
+        def worker():
+            was_running = False
+            try:
+                with self.control_lock:
+                    with self._migrate_guard:
+                        self._migrate["phase"] = "stopping"
+                    try:
+                        was_running = bool(as_dict(self.call("process_status",
+                                                             timeout=10.0)).get("running"))
+                    except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing):
+                        was_running = False
+                    if was_running:
+                        # 必须真的停掉：旧目录的 .part 还有打开的 fd 在写，
+                        # 不停就搬，搬走的是那一刻的内容，之后引擎继续往旧 inode 写。
+                        try:
+                            self.call("stop", timeout=ENGINE_RESTART_BUDGET)
+                        except (EngineTimeout, OfflineError, EngineFailure,
+                                ServiceMissing) as exc:
+                            with self._migrate_guard:
+                                self._migrate["error"] = "停止引擎失败，未执行迁移：%s" % (exc,)
+                            return
+                    with self._migrate_guard:
+                        self._migrate["phase"] = "moving"
+                    result = as_dict(self.call("migrate_temp", old_dir, new_dir,
+                                               timeout=ENGINE_RESTART_BUDGET))
+                    with self._migrate_guard:
+                        self._migrate["count"] = int(result.get("count") or 0)
+                        self._migrate["moved"] = list(result.get("moved") or [])
+                    self.log("临时目录迁移：%s → %s，共 %d 个文件"
+                             % (old_dir, new_dir, int(result.get("count") or 0)))
+            except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing) as exc:
+                with self._migrate_guard:
+                    self._migrate["error"] = "迁移失败：%s" % (exc,)
+            except Exception as exc:               # noqa: BLE001 - 后台线程不能带着异常死掉
+                with self._migrate_guard:
+                    self._migrate["error"] = "迁移失败：%s" % (exc,)
+            finally:
+                # 不管成没成功，引擎都要拉回来 —— 用户点的是「迁移」，不是「关掉引擎」。
+                if was_running:
+                    with self._migrate_guard:
+                        self._migrate["phase"] = "starting"
+                    try:
+                        self.call("start", timeout=ENGINE_RESTART_BUDGET)
+                        self.engine_phase = "running"
+                    except (EngineTimeout, OfflineError, EngineFailure, ServiceMissing) as exc:
+                        self.engine_phase = "failed"
+                        with self._migrate_guard:
+                            self._migrate["warning"] = "文件已处理，但引擎没能自动启动：%s" % (exc,)
+                with self._migrate_guard:
+                    self._migrate["running"] = False
+                    if not self._migrate.get("error") and not self._migrate.get("warning"):
+                        self._migrate["phase"] = "done"
+                    elif self._migrate.get("error"):
+                        self._migrate["phase"] = "failed"
+
+        threading.Thread(target=worker, name="temp-migrate", daemon=True).start()
+        return True
 
     def status(self):
         """引擎进程状态。永远不抛异常 —— /api/health 必须能答话。
@@ -2816,6 +2947,24 @@ class Handler(BaseHTTPRequestHandler):
                 return
             warnings = []
             message = ""
+            engine_patch = patch.get("engine") if isinstance(patch.get("engine"), dict) else {}
+            # 下载 / 临时目录先验一遍能不能真的写：目录建不出来时以前照样报「已保存」，
+            # 引擎拿它去建 .part 全是 ENOENT，用户看到的是「任务加了但一直 0%」。
+            # 这一步要放在 store.update() 之前，校验不过就不落盘，保持改动前的配置。
+            for key, label in (("incoming_dir", "下载完成目录"), ("temp_dir", "临时文件目录")):
+                value = engine_patch.get(key)
+                if not value:
+                    continue
+                # check_dir 只碰文件系统、不走 EC，所以不必排进引擎队列 ——
+                # 引擎正好卡在一次慢调用里时，排队会把「保存设置」一起堵住。
+                try:
+                    reason = str(RT.service.check_dir(value) or "") \
+                        if RT.service is not None else ""
+                except Exception as exc:                            # noqa: BLE001
+                    reason = "目录无法检查：%s（%s）" % (value, exc)
+                if reason:
+                    self.fail(400, "%s不可用，设置未保存：%s" % (label, reason))
+                    return
             panel_patch = patch.get("panel") if isinstance(patch.get("panel"), dict) else {}
             desired_port = int_or(panel_patch.get("port")) if "port" in panel_patch else 0
             if desired_port and desired_port != RT.port:
@@ -2829,10 +2978,16 @@ class Handler(BaseHTTPRequestHandler):
                 warnings.append("面板已切换为 http://<本机IP>:%d/，旧端口已关闭" % desired_port)
             settings, changed = RT.store.update(patch)
             restart_required = False
-            engine_patch = patch.get("engine") if isinstance(patch.get("engine"), dict) else {}
             if engine_patch:
-                # 整份 engine 补丁交给 core：它自己决定哪些走 EC 即时生效、哪些要写
-                # amule.conf 等重启，并把权威的 restart_required 回给我们。
+                # 打码的引擎密码绝不能进 EC / amule.conf：浏览器拿到的就是 "__SET__"，
+                # 而整份 draft 保存时会原样回传。store.update() 已经把它挡在落盘那一步，
+                # 但 apply_prefs 拿的还是原始 patch —— 于是 amule.conf 里的 ECPassword
+                # 会被写成 md5("__SET__")，引擎下次重启就再也连不上了（面板看起来还在，
+                # 实际所有引擎接口全挂）。这里必须在调用前剔除。
+                engine_patch = {k: v for k, v in engine_patch.items()
+                                if k != "ec_password"
+                                or str(v or "").strip() not in ("", storemod.SECRET_MARK,
+                                                                "__KEEP__")}
                 try:
                     applied = as_dict(RT.call("apply_prefs", engine_patch, timeout=10.0))
                     restart_required = bool(applied.get("restart_required"))
@@ -2849,12 +3004,22 @@ class Handler(BaseHTTPRequestHandler):
                             "ipfilter", "ec_password", "upnp"):
                     if key in engine_patch:
                         restart_required = True
+            # 标了「要重启」就必须真的去重启。以前只把 restart_required 回给前端、
+            # 前端提示「引擎正在按新配置重启」并轮询等就绪 —— 但没人真的去重启，
+            # 于是端口/目录改了不生效、提示还一直在转，看起来像卡死。
+            # 重启本身要停进程再起（几十秒），不能塞在这条请求里同步做完：
+            # 面板的 /api 预算是 15 秒，超时只会让前端看到失败，引擎其实还在重启。
+            # 所以这里只负责「把重启排上去」，请求立刻返回，前端照旧轮询 health。
+            restarting = False
+            if restart_required and RT.service is not None:
+                restarting = RT.schedule_engine_restart()
             RT.log("设置已更新：%s" % (", ".join(sorted(changed)) or "无变化"))
             payload = {
                 "ok": True,
                 "settings": mask_settings(RT.store.settings()),
                 "changed": sorted(changed),
                 "restart_required": restart_required,
+                "restarted": restarting,
                 "warnings": warnings,
             }
             if message:
@@ -3112,6 +3277,32 @@ class Handler(BaseHTTPRequestHandler):
             results = RT.send_channels(title, body_text, event="test", channel_id=channel_id)
             ok = bool(results) and all(item.get("ok") for item in results)
             self.send_json({"ok": ok, "results": results, "sent": len(results)})
+            return
+
+        # ---------------- 临时目录迁移 ----------------
+        if path == "/api/engine/temp-migrate":
+            engine = RT.store.section("engine")
+            if method == "GET":
+                # 迁移是后台任务（停引擎要等 partfile 落盘、起引擎要等 EC 就绪，
+                # 加起来超过一个 /api 请求的预算），前端轮询这里拿结果。
+                self.send_json(dict(RT.temp_migrate_state()))
+                return
+            self.require_method(method, "POST")
+            body = self.json_body()
+            old_dir = str(body.get("from") or "").strip()
+            new_dir = str(body.get("to") or "").strip()
+            old_dir = old_dir or str(engine.get("temp_dir") or "").strip()
+            new_dir = new_dir or old_dir
+            if not old_dir or not new_dir:
+                self.fail(400, "请先指定要迁移到哪个临时目录")
+                return
+            if os.path.realpath(old_dir) == os.path.realpath(new_dir):
+                self.fail(400, "新旧目录相同，无需迁移")
+                return
+            if not RT.start_temp_migrate(old_dir, new_dir):
+                self.fail(409, "已有一次迁移正在进行，请等它结束")
+                return
+            self.send_json({"ok": True, "started": True, "from": old_dir, "to": new_dir})
             return
 
         # ---------------- 维护 / 存储 ----------------

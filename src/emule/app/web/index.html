@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>eMule</title>
 <link rel="icon" href="./images/icon.svg">
-<link rel="stylesheet" href="./style.css?v=26.11.62">
+<link rel="stylesheet" href="./style.css?v=26.11.63">
 </head>
 <body>
 <div id="app" v-cloak>
@@ -1153,6 +1153,24 @@
             <label>{{ t('settings.dirs.temp') }}</label>
             <input class="input mono" v-model="draft.engine.temp_dir">
           </div>
+          <!-- 换临时目录后，已有任务的 .part 还在旧目录里。不迁过去引擎就找不到它们，
+               任务列表会整个空掉。这里把「迁移」做成用户明确点一下才执行。 -->
+          <div class="dirmig" v-if="tempMigrateFrom">
+            <div class="dirmig-text">
+              <b>{{ t('settings.dirs.migTitle') }}</b>
+              <span class="faint">{{ t('settings.dirs.migBody') }}</span>
+              <code class="mono">{{ tempMigrateFrom }}</code>
+            </div>
+            <div class="dirmig-act">
+              <button class="btn sm primary" :disabled="tempMigrating" @click="migrateTemp">
+                <span class="ic" v-html="ic(tempMigrating ? 'refresh' : 'check')"></span>
+                {{ tempMigrating ? t('settings.dirs.migBusy') : t('settings.dirs.migGo') }}
+              </button>
+              <button class="btn sm" :disabled="tempMigrating" @click="tempMigrateFrom = ''">
+                {{ t('settings.dirs.migSkip') }}
+              </button>
+            </div>
+          </div>
           <div class="field">
             <label>{{ t('settings.dirs.shared') }}</label>
             <div class="faint" v-if="!draft.engine.shared_dirs.length" style="padding:2px 0 8px">
@@ -1977,11 +1995,11 @@
 </div>
 
 <script src="./lib/vue.global.prod.js"></script>
-<script src="./js/i18n.js?v=26.11.62"></script>
-<script src="./js/util.js?v=26.11.62"></script>
-<script src="./js/api.js?v=26.11.62"></script>
-<script src="./js/charts.js?v=26.11.62"></script>
-<script src="./js/md.js?v=26.11.62"></script>
-<script src="./js/app.js?v=26.11.62"></script>
+<script src="./js/i18n.js?v=26.11.63"></script>
+<script src="./js/util.js?v=26.11.63"></script>
+<script src="./js/api.js?v=26.11.63"></script>
+<script src="./js/charts.js?v=26.11.63"></script>
+<script src="./js/md.js?v=26.11.63"></script>
+<script src="./js/app.js?v=26.11.63"></script>
 </body>
 </html>

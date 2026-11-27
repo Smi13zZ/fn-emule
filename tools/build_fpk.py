@@ -231,7 +231,8 @@ def main():
                   "test_shareddir_guard.py", "test_shared_cache.py",
                   "test_engine_priority.py", "test_expand.py",
                   "test_reload_async.py", "test_shareddir_idempotent.py",
-                  "test_search_fixes.py", "test_update_ui.py", "test_update_flow.py"]
+                  "test_search_fixes.py", "test_update_ui.py", "test_update_flow.py",
+                  "test_dir_migrate.py", "test_dir_settings_guard.py"]
     for name in unit_tests:
         path = os.path.join(unit_dir, name)
         if not os.path.isfile(path):

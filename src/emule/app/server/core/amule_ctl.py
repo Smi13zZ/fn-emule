@@ -356,22 +356,103 @@ class AmuleCtl(object):
         return merged
 
     # -- 目录 ---------------------------------------------------------
+    #: 用户可写的目录权限。fnOS 的数据盘根（/vol1/1000）带一条把其它位全清掉的 ACL，
+    #: 以 root 身份在它下面 mkdir 出来的目录实测是 `d---------`（0000），连 root 之外的
+    #: 任何进程都进不去。所以凡是交给引擎读写的目录，建完必须显式 chmod。
+    DIR_MODE = 0o777
+
+    def _makedirs_open(self, path, mode=None):
+        """建目录并放开权限，**连同这中间被新建出来的每一层**。
+
+        只 chmod 我们自己新建的那几层：已经存在的目录一律不动 —— 用户把
+        `/vol1/1000/downloads` 这类已有目录指过来时，不该顺手改掉人家的权限。
+
+        为什么要一层层建：`os.makedirs()` 一次性就把中间层建好了，而中间层同样是
+        从父目录那条清掉其它位的 ACL 继承下来的 0000。实测
+        `/vol1/1000/x` 建出来是 `d---------`，只看最末一层 `x/Temp` 是不是 777
+        会漏掉它 —— 而 `x` 进不去，`x/Temp` 是 777 也没用。
+        """
+        if not path:
+            return
+        target = os.path.abspath(path)
+        # 找最深的已存在祖先，从它下面开始逐层建
+        missing = []
+        cursor = target
+        while cursor and not os.path.isdir(cursor):
+            missing.append(cursor)
+            parent = os.path.dirname(cursor)
+            if parent == cursor:
+                break
+            cursor = parent
+        for layer in reversed(missing):
+            try:
+                os.mkdir(layer)
+            except FileExistsError:
+                continue
+            except OSError as exc:
+                raise
+            if mode is not None:
+                try:
+                    os.chmod(layer, mode)
+                except OSError:
+                    pass
+        # 目标本来就在（没进 missing）时也要保证末层权限正确
+        if os.path.isdir(target) and mode is not None and target not in missing:
+            try:
+                os.chmod(target, mode)
+            except OSError:
+                pass
+
     def ensure_dirs(self, settings=None):
+        """建齐运行目录；用户目录额外放开权限。返回 [(路径, 原因)] 的失败清单。
+
+        失败要被上层看见：早先这里把所有 OSError 都吞掉，路径写错时配置照样报
+        「已保存」，用户直到发现文件落在别处才知道没生效。
+        """
         settings = settings or self.settings()
+        failures = []
+
+        def make(path, mode=None):
+            if not path:
+                return
+            try:
+                self._makedirs_open(path, mode)
+            except OSError as exc:
+                failures.append((str(path), str(exc)))
+
         for path in (self.var_dir, self.config_dir,
                      os.path.join(self.var_dir, "home"),
                      os.path.join(self.config_dir, "Temp"),
-                     os.path.join(self.config_dir, "Incoming"),
-                     settings["incoming_dir"], settings["temp_dir"]):
-            try:
-                os.makedirs(path, exist_ok=True)
-            except OSError:
-                pass
+                     os.path.join(self.config_dir, "Incoming")):
+            make(path, self.DIR_MODE)
+        # 下载完成目录 / 临时文件目录 / 共享目录都要给引擎和其它账号读写
+        make(settings.get("incoming_dir"), self.DIR_MODE)
+        make(settings.get("temp_dir"), self.DIR_MODE)
         for shared in settings.get("shared_dirs") or []:
-            try:
-                os.makedirs(shared, exist_ok=True)
-            except OSError:
-                pass
+            make(shared, self.DIR_MODE)
+        return failures
+
+    def check_dir_writable(self, path):
+        """目录能否真的落盘：建不出来、或建完写不进探针文件都返回中文原因。"""
+        text = str(path or "").strip()
+        if not text:
+            return "目录不能为空"
+        if not os.path.isabs(text):
+            return "目录必须是绝对路径：%s" % text
+        try:
+            self._makedirs_open(text, self.DIR_MODE)
+        except OSError as exc:
+            return "目录无法创建：%s（%s）" % (text, exc)
+        if not os.path.isdir(text):
+            return "路径已存在但不是目录：%s" % text
+        probe = os.path.join(text, ".fn-emule-write-test")
+        try:
+            with open(probe, "w", encoding="utf-8") as handle:
+                handle.write("ok")
+            os.remove(probe)
+        except OSError as exc:
+            return "目录不可写：%s（%s）" % (text, exc)
+        return ""
 
     # -- 配置生成 -----------------------------------------------------
     def conf_text(self, settings=None, shared_dirs=None):

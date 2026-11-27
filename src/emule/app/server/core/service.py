@@ -740,7 +740,13 @@ class EmuleService(object):
         """幂等：建目录、生成 amule.conf、首次下载 bootstrap 文件。"""
         with self._lock:
             engine = self._engine_settings()
-            self._ctl.ensure_dirs(engine)
+            # 目录建不出来不能静默继续：引擎会照配置去找一个不存在的路径，
+            # 表现成「任务加了但不动」。这里记一条，让面板健康检查能看见。
+            for path, reason in self._ctl.ensure_dirs(engine) or []:
+                try:
+                    self._ctl._log("error", "目录不可用：%s（%s）" % (path, reason))  # noqa: SLF001
+                except Exception:                  # noqa: BLE001 - 记日志失败不影响启动
+                    pass
             conf_path = os.path.join(self.config_dir, "amule.conf")
             wanted = self._ctl.conf_text(engine)
             current = None
@@ -885,6 +891,80 @@ class EmuleService(object):
         time.sleep(0.5)
         self.start()
         return None
+
+    # ------------------------------------------------------------ 目录迁移
+    #: 临时目录里属于「一个下载任务」的文件名。partmet 编号由 aMule 分配，
+    #: 换目录时这些文件必须整组跟着走，少一个 `.part.met` 任务就等于丢了。
+    _TEMP_PART_RE = re.compile(r"^\d{3,6}\.part(\.met(\.bak|\.seeds)?)?$")
+
+    def temp_part_files(self, temp_dir=None):
+        """列出临时目录里属于下载任务的 part 文件（只读，不建目录）。"""
+        root = str(temp_dir or (self._engine_settings().get("temp_dir") or "")).strip()
+        if not root or not os.path.isdir(root):
+            return []
+        names = []
+        try:
+            for name in os.listdir(root):
+                if self._TEMP_PART_RE.match(name):
+                    names.append(name)
+        except OSError:
+            return []
+        return sorted(names)
+
+    def migrate_temp(self, old_dir, new_dir):
+        """把旧临时目录里的 part 文件搬到新目录。**必须在引擎停着的时候调用。**
+
+        为什么不自动做：搬家期间引擎必须停着，而「保存设置」这件事用户随时会点。
+        自动搬会在用户不知情的情况下停掉所有下载；所以由用户明确点「迁移」再执行。
+
+        安全性：源/目标都做 realpath 校验、目标已存在同名文件一律不覆盖、
+        中途失败把已经搬走的原路搬回，绝不留下半套 part 文件。
+        """
+        old = str(old_dir or "").strip()
+        new = str(new_dir or "").strip()
+        if not old or not new:
+            raise EmuleError("目录为空，无法迁移")
+        if os.path.realpath(old) == os.path.realpath(new):
+            return {"moved": [], "count": 0}
+        if self._ctl.find_pid():
+            raise EmuleError("迁移临时目录前必须先停止引擎")
+        if not os.path.isdir(old):
+            return {"moved": [], "count": 0}
+        try:
+            os.makedirs(new, exist_ok=True)
+        except OSError as exc:
+            raise EmuleError("新临时目录无法创建：%s（%s）" % (new, exc))
+        reason = self._ctl.check_dir_writable(new)
+        if reason:
+            raise EmuleError(reason)
+
+        names = self.temp_part_files(old)
+        # 目标目录先整体预检一遍。冲突挪到循环里才发现的话，前面已经搬走的文件
+        # 会留在新目录、后面的还在旧目录 —— 也就是「半套」，比不搬更糟。
+        conflicts = [n for n in names if os.path.exists(os.path.join(new, n))]
+        if conflicts:
+            raise EmuleError("新临时目录里已有同名文件，未执行迁移：%s"
+                             % ", ".join(conflicts[:3]))
+        done = []
+        for name in names:
+            source = os.path.join(old, name)
+            target = os.path.join(new, name)
+            try:
+                shutil.move(source, target)
+            except (OSError, shutil.Error) as exc:
+                # 已搬过去的原路搬回，避免一半在新一半在旧
+                for moved in reversed(done):
+                    try:
+                        shutil.move(os.path.join(new, moved), os.path.join(old, moved))
+                    except (OSError, shutil.Error):
+                        pass
+                raise EmuleError("迁移临时文件失败（%s）：%s" % (name, exc))
+            done.append(name)
+        try:
+            os.chmod(new, self._ctl.DIR_MODE)
+        except OSError:
+            pass
+        return {"moved": done, "count": len(done)}
 
     def shutdown(self):
         """面板退出时调用：断开 EC、停守护、优雅停引擎。"""
@@ -2801,6 +2881,10 @@ class EmuleService(object):
             "raw": raw,
         }
         return result
+
+    def check_dir(self, path):
+        """校验一个下载/临时目录是否真的可用；返回中文原因，可用时返回空串。"""
+        return self._ctl.check_dir_writable(path)
 
     def apply_prefs(self, patch):
         """把面板设置写回 aMule（EC SET_PREFERENCES），返回生效项与需重启项。"""

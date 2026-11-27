@@ -204,6 +204,9 @@
         settingsTab: "panel",
         settingsSaving: false,
         newSharedDir: "",
+        /* 换了临时目录后，旧目录里还留着已有任务的 .part；非空就在设置页给出迁移入口 */
+        tempMigrateFrom: "",
+        tempMigrating: false,
         bootstrapping: false,
 
         notifyChannels: [],
@@ -1708,6 +1711,8 @@
       saveSettingsDraft: async function () {
         if (this.settingsSaving) return;
         const localRestart = this.restartNeeded;
+        const prevTemp = String((this.saved && this.saved.engine && this.saved.engine.temp_dir) || "");
+        const nextTemp = String((this.draft && this.draft.engine && this.draft.engine.temp_dir) || "");
         this.settingsSaving = true;
         try {
           const res = await window.EMU_API.saveSettings(this.draft);
@@ -1723,8 +1728,16 @@
           if (res && res.warnings && res.warnings.length) {
             this.toast(String(res.warnings[0]), "err");
           }
+          // 临时目录变了：已有任务的 .part 还在旧目录，引擎按新目录找不到它们。
+          // 不自动搬（搬家要停引擎，会打断所有下载），交给用户在页面上点一下。
+          if (prevTemp && nextTemp && prevTemp !== nextTemp) {
+            this.tempMigrateFrom = prevTemp;
+          }
           const restart = (res && res.restart_required !== undefined) ? !!res.restart_required : localRestart;
           if (restart) {
+            // 后端已经把「停引擎 → 起引擎」排到后台线程（停要等 partfile 落盘，
+            // 起要等 EC 端口就绪，加起来超过一个 /api 请求的预算）。这里只负责
+            // 提示并轮询到真的回来；以前没有人去重启，这段轮询等于空转 20 秒。
             this.ok("settings.restartHint");
             this.engineBarNote = this.t("settings.restartWatch");
             setTimeout(() => { this.bootstrapPanel().then(() => {
@@ -1741,9 +1754,10 @@
                     this.ok("engine.state.running");
                   }
                 } catch (e) { /* ignore */ }
-                if (n >= 20) { clearInterval(poll); }
+                // 停 20 秒 + 起 40 秒的余量，给够 60 轮
+                if (n >= 60) { clearInterval(poll); }
               }, 1000);
-            }); }, 2500);
+            }); }, 2000);
           } else {
             this.ok("settings.saved");
             this.engineBarNote = "";
@@ -1758,6 +1772,43 @@
       resetSettings: function () {
         this.draft = clone(this.saved);
         this.applyTheme();
+      },
+      /* 把旧临时目录里的 .part 搬到当前目录。后端先停引擎、搬完再起引擎；
+         搬不动就整批回滚并报错，不会留下半套文件。全程是后台任务，这里轮询结果。 */
+      migrateTemp: async function () {
+        if (this.tempMigrating) return;
+        const from = this.tempMigrateFrom;
+        const to = String((this.draft.engine && this.draft.engine.temp_dir) || "");
+        if (!from || !to) return;
+        this.tempMigrating = true;
+        try {
+          await window.EMU_API.migrateTemp(from, to);
+          // 停引擎要等 partfile 落盘、起引擎要等 EC 就绪，一次请求装不下，
+          // 所以起完之后轮询状态；最多等 3 分钟。
+          const result = await this.pollMigrate();
+          if (result.error) {
+            this.toast(result.error, "err");
+          } else if (result.warning) {
+            this.tempMigrateFrom = "";
+            this.toast(result.warning, "err");
+          } else {
+            this.tempMigrateFrom = "";
+            this.ok("settings.dirs.migDone", { n: String(result.count || 0) });
+          }
+          await this.bootstrapPanel();
+        } catch (e) {
+          this.fail("settings.dirs.migFailed", e);
+        } finally {
+          this.tempMigrating = false;
+        }
+      },
+      pollMigrate: async function () {
+        for (let i = 0; i < 90; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const st = await window.EMU_API.migrateTempState();
+          if (!st || !st.running) return st || {};
+        }
+        return { error: this.t("settings.dirs.migTimeout") };
       },
       addSharedDir: function () {
         const v = (this.newSharedDir || "").trim();

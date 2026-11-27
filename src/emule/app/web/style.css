@@ -1023,6 +1023,29 @@ canvas { display: block; width: 100%; height: 100%; }
 }
 .dirrow .mono { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 临时目录迁移提示：一行说明 + 右侧两个按钮。
+   长路径必须在左侧折行，否则会把整张卡片撑宽（手机端尤其明显）。 */
+.dirmig {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 10px 12px; margin: -4px 0 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.dirmig-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; line-height: 1.6; }
+.dirmig-text b { color: var(--text); font-weight: 600; }
+.dirmig-text code {
+  font-family: var(--mono); font-size: 11.5px; color: var(--dim);
+  overflow-wrap: anywhere; word-break: break-all;
+}
+.dirmig-act { flex: 0 0 auto; display: flex; gap: 8px; align-items: center; }
+.dirmig-act .btn { white-space: nowrap; }
+@media (max-width: 720px) {
+  .dirmig { flex-direction: column; align-items: stretch; }
+  .dirmig-act { justify-content: flex-end; }
+}
+
 /* statistic group cards: label left, mono value right */
 .sttable td:last-child { text-align: right; font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .sttable td { padding: 8px 12px; }

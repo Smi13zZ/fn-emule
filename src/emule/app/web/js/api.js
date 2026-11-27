@@ -230,6 +230,13 @@
       return request(BASE + "/update/install", { method: "POST", body: body });
     },
     updateProgress: function () { return request(BASE + "/update/progress"); },
+
+    /* ---- 引擎临时目录迁移（后台任务，先 POST 再轮询状态） ---- */
+    migrateTemp: function (from, to) {
+      return request(BASE + "/engine/temp-migrate",
+        { method: "POST", body: { from: from, to: to } });
+    },
+    migrateTempState: function () { return request(BASE + "/engine/temp-migrate"); },
   };
 
   window.EMU_API = API;
